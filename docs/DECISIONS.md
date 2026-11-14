@@ -320,7 +320,7 @@ dereferences to `str` and compares with `&str` for convenience.
 `requests::start_enroll_udp` now takes a `&UserId` and fails if it is not
 numeric.
 
-## D25. UDP transport (revised after phase 4 review)
+## D25. UDP transport (revised twice after phase 4 review)
 
 - **Framing.** One packet per datagram, no prefix. The socket is connected
   to the device address, so the OS drops datagrams from anywhere else.
@@ -334,18 +334,20 @@ numeric.
     the command code. Every streamed `Data` packet in pyzk's test fixtures
     is a TCP frame. The other Rust ports copy pyzk. Nothing is implemented
     on a guess; `zkctl diagnose` measures it (`udp_stream_headers` in its
-    report, from a 16 KiB UDP read). If hardware shows a sequence,
-    `ChunkReceiver` checks it as on TCP.
+    report) with `Client::sample_udp_stream`, which requests one 16 KiB
+    chunk and returns only the header fields of the packets that answer;
+    no data from it is kept, so it cannot yield wrong records. If hardware
+    shows a sequence, `ChunkReceiver` checks it as on TCP, and larger UDP
+    chunks become safe to offer.
   - (b) *Does the 2006 manual define a buffer checksum command?* **No.** Its
     command table (`pyzk/docs/_static/Communication_protocol_manual_CMD.pdf`)
     has no checksum or CRC command for buffers, and `CMD_PREPARE_BUFFER` /
     `CMD_READ_BUFFER` (1503/1504) are not in it at all. The only checksum
     is the per-packet header checksum, which a reordering does not affect.
     The manual does say each streamed packet is at most 1 KiB.
-- **Default: single-datagram chunks** (`UdpChunking::SingleDatagram`).
-  `ReadBuffer` requests ask for at most 1008 bytes, the per-packet size
-  seen in `PrepareData` replies and under the manual's 1 KiB limit, so each
-  reply holds one `Data` packet and there is nothing to reorder. What can
+- **Single-datagram chunks, always.** `ReadBuffer` requests over UDP ask
+  for at most 1008 bytes (why 1008, below), so each reply holds one `Data`
+  packet and there is nothing to reorder. What can
   still be reordered is detected: an `AckOk` ahead of its `Data` is a short
   read (retried), and a `Data` ahead of its `PrepareData` is the whole
   chunk, accepted (the bytes are the same). If the device splits a reply
@@ -354,13 +356,32 @@ numeric.
   (not below 64 bytes), and the chunk is read again. Cost: one round trip
   per KiB, so 100 000 40-byte attendance records (4 MB) take about 4 000
   requests.
-- **Opt-in: 16 KiB chunks** (`UdpChunking::Large`, as pyzk). Documented as
-  unsafe against reordering: two `Data` datagrams swapped in transit give a
-  chunk of the right length with its bytes in the wrong order, and it is
-  accepted. A mock test (`large_chunks_accept_reordered_datagrams_silently`)
-  shows the read succeeding with wrong records.
-- **Loss and duplication** are detected by size in both modes and retried
-  like any corrupt chunk (D22).
+- **No large chunks.** pyzk's 16 KiB UDP chunks were briefly an opt-in
+  (`UdpChunking::Large`) and were removed from the public API: two `Data`
+  datagrams swapped in transit give a chunk of the right length with its
+  bytes in the wrong order, it is accepted, and the result is wrong
+  attendance records with no error. Gating them on a compatibility row was
+  considered and rejected: reordering happens in the network, not the
+  device, so no device report can show it will not happen. The property
+  that would make large chunks safe is a sequence number in UDP `Data`
+  packets, which the client would then check; (a) above measures it.
+- **Why 1008 and not 1016.** The manual's 1 KiB limit does not say what it
+  covers. The only measurements are in pyzk's TCP fixtures: three
+  `PrepareData` replies announce a per-packet size of 1008 (`f0 03 00 00`),
+  and every full `Data` frame is 1016 bytes long (`f8 03`), that is an
+  8-byte header and 1008 bytes of payload. With the 8-byte TCP prefix that
+  is exactly 1024 bytes on the wire, so on TCP the device fills a 1 KiB
+  buffer with prefix, header and payload. Over UDP there is no prefix, so
+  the payload could be 1016 if the device sizes datagrams the same way, or
+  stay 1008 if the payload size is fixed; no UDP capture exists to tell.
+  1008 is the only size observed, and it is safe either way: on a device
+  that sends 1016-byte payloads it costs 0.8% more requests; 1016 on a
+  device that sends 1008-byte payloads would split the first chunk, which
+  is rejected and re-read at 1008, once per connection with a warning.
+  `diagnose` reports the device's UDP packet size (`packet_sizes`), so this
+  can be revisited with evidence.
+- **Loss and duplication** are detected by size and retried like any
+  corrupt chunk (D22).
 - **A stalled stream** (the tail of a chunk lost, so no `AckOk` arrives)
   is the one timeout that does not close the connection: under
   `ReplyIdPolicy::Strict`, once the stream has started, the client returns
@@ -411,11 +432,12 @@ list.
   device-state, upload and power command and every unnamed code.
 - `zkctl diagnose` (brought forward from phase 6) uses only read-only
   clients. It reads the device facts and counters, then reads the user and
-  attendance tables three times (TCP 64 KiB, UDP single-datagram, UDP
-  16 KiB), each first under Strict reply IDs and, if that times out, under
-  Lenient. It reports one `docs/COMPATIBILITY.md` row plus the measurements
-  behind it, whether the UDP tables equal the TCP ones, and the header
-  fields of streamed UDP packets (D25 a). It never reads templates.
+  attendance tables twice (TCP 64 KiB chunks, UDP single-datagram chunks),
+  each first under Strict reply IDs and, if that times out, under Lenient.
+  Over UDP it also takes one stream sample (D25 a). It reports one
+  `docs/COMPATIBILITY.md` row plus the measurements behind it, whether the
+  UDP tables equal the TCP ones, and the header fields of streamed UDP
+  packets. It never reads templates.
 - Serial number and MAC are replaced by `scrubbed` unless
   `--include-identifiers`. The report holds counts, sizes and layout names,
   never records.

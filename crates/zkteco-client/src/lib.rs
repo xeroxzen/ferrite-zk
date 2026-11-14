@@ -31,9 +31,9 @@
 //!   [`Error::ConnectionClosed`] until [`Client::reconnect`].
 //! - [`Transport::Auto`] (the default) uses TCP, falling back to UDP.
 //! - Table reads stage the table on the device, read it in chunks (64 KiB
-//!   over TCP; over UDP one datagram per request by default, see
-//!   [`UdpChunking`]; each retried per [`RetryPolicy`] if its reply is
-//!   malformed or short), and release it.
+//!   over TCP; one datagram per request over UDP, see [`Transport::Udp`];
+//!   each retried per [`RetryPolicy`] if its reply is malformed or short),
+//!   and release it.
 //! - [`ClientConfig::read_only`] refuses every command outside
 //!   [`READ_ONLY_COMMANDS`] before it is sent.
 //! - TCP and UDP behave the same, except that over UDP a stream that stalls
@@ -54,6 +54,7 @@ pub mod compat;
 mod config;
 mod data;
 mod device;
+mod diag;
 mod error;
 mod link;
 mod record;
@@ -61,11 +62,10 @@ mod transfer;
 mod write;
 
 pub use client::{probe, Client};
-pub use config::{
-    ClientConfig, ReplyIdPolicy, RetryPolicy, Transport, UdpChunking, DEFAULT_PORT, READ_ONLY_COMMANDS,
-};
+pub use config::{ClientConfig, ReplyIdPolicy, RetryPolicy, Transport, DEFAULT_PORT, READ_ONLY_COMMANDS};
 pub use data::{RawTable, ResolvedAttendance, UserIdSource};
 pub use device::NetworkParams;
+pub use diag::{SampledPacket, StreamSample};
 pub use error::{Error, Result};
 pub use record::{Direction, RecordedPacket, Recording};
 pub use zkteco_proto;

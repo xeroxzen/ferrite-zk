@@ -28,7 +28,11 @@ pub enum Transport {
 }
 
 impl Transport {
-    /// Largest chunk to request with [`Command::ReadBuffer`].
+    /// Largest chunk to request with [`Command::ReadBuffer`], as pyzk
+    /// requests it. Over UDP a chunk this size arrives as several `Data`
+    /// datagrams with no known sequence number, so reordering in transit
+    /// goes undetected; `zkteco-client` requests one datagram's worth at a
+    /// time instead (DECISIONS.md D25).
     #[must_use]
     pub const fn max_read_chunk(self) -> u32 {
         match self {

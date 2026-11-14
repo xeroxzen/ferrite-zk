@@ -1,35 +1,41 @@
 //! Client behaviour over UDP against the mock device: one packet per
-//! datagram; single-datagram chunks by default; 16 KiB chunks
-//! (`UdpChunking::Large`) with loss detected by size.
+//! datagram, one `Data` packet per chunk, loss and duplication detected by
+//! size, reordering made harmless.
 
 mod support;
 
 use std::time::Duration;
 
 use support::{punches, templates, users, DeviceState, Faults, MockDevice};
-use zkteco_client::{Client, ClientConfig, Error, LiveEvent, ReplyIdPolicy, RetryPolicy, UdpChunking, Uid};
+use zkteco_client::{Client, Error, LiveEvent, RawTable, ReplyIdPolicy, RetryPolicy, Uid};
 use zkteco_proto::records::finger;
 use zkteco_proto::records::user::UserFormat;
 use zkteco_proto::{requests, Command, TextEncoding};
 
-/// 72-byte users filling five 16 KiB chunks.
+/// 72-byte users filling 72 single-datagram chunks.
 const MANY_USERS: u16 = 1000;
 
 async fn device(state: DeviceState) -> MockDevice {
     MockDevice::start(state).await
 }
 
+/// Many users, streamed as on a device that answers each chunk with
+/// `PrepareData`, one 1008-byte `Data` packet and `AckOk`.
 fn big(faults: Faults) -> DeviceState {
     DeviceState {
         users: users(MANY_USERS),
+        inline_limit: 0,
+        data_packet_len: 1008,
         faults,
         ..DeviceState::default()
     }
 }
 
-/// UDP with 16 KiB chunks.
-fn large(dev: &MockDevice) -> ClientConfig {
-    dev.config_udp().udp_chunking(UdpChunking::Large)
+/// The single-datagram chunk plan for `total` bytes.
+fn plan(total: u32) -> Vec<(u32, u32)> {
+    (0..total.div_ceil(1008))
+        .map(|i| (i * 1008, 1008.min(total - i * 1008)))
+        .collect()
 }
 
 fn read_buffer_requests(dev: &MockDevice) -> Vec<(u32, u32)> {
@@ -97,7 +103,7 @@ async fn probe_over_udp_opens_and_closes_a_session() {
 }
 
 #[tokio::test]
-async fn large_tables_in_16k_chunks() {
+async fn large_tables_one_datagram_at_a_time() {
     let dev = device(DeviceState {
         users: users(MANY_USERS),
         attendance: punches(3000),
@@ -105,16 +111,12 @@ async fn large_tables_in_16k_chunks() {
         ..DeviceState::default()
     })
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     let got = client.users().await.unwrap();
     assert!(got.is_clean(), "{:?}", got.rejected);
     assert_eq!(got.records, dev.state().users);
 
-    let total = 4 + 72 * u32::from(MANY_USERS);
-    let plan: Vec<(u32, u32)> = (0..total.div_ceil(16_384))
-        .map(|i| (i * 16_384, 16_384.min(total - i * 16_384)))
-        .collect();
-    assert_eq!(read_buffer_requests(&dev), plan);
+    assert_eq!(read_buffer_requests(&dev), plan(4 + 72 * u32::from(MANY_USERS)));
 
     let att = client.attendance().await.unwrap();
     assert!(att.is_clean());
@@ -128,11 +130,11 @@ async fn large_tables_in_16k_chunks() {
 #[tokio::test]
 async fn lost_datagram_is_a_short_read_and_retried() {
     let dev = device(big(Faults {
-        lose_data_packet_once: Some(5),
+        lose_data_packet_once: Some(0),
         ..Faults::default()
     }))
     .await;
-    let mut client = Client::connect(large(&dev).request_timeout(Duration::from_millis(150)))
+    let mut client = Client::connect(dev.config_udp().request_timeout(Duration::from_millis(150)))
         .await
         .unwrap();
     assert_eq!(client.users().await.unwrap().records, dev.state().users);
@@ -144,11 +146,12 @@ async fn lost_datagram_is_a_short_read_and_retried() {
 #[tokio::test]
 async fn lost_datagram_without_retry_reports_short_read() {
     let dev = device(big(Faults {
-        lose_data_packet_once: Some(5),
+        lose_data_packet_once: Some(0),
         ..Faults::default()
     }))
     .await;
-    let config = large(&dev)
+    let config = dev
+        .config_udp()
         .request_timeout(Duration::from_millis(150))
         .retry(RetryPolicy::NONE);
     let mut client = Client::connect(config).await.unwrap();
@@ -157,8 +160,8 @@ async fn lost_datagram_without_retry_reports_short_read() {
         matches!(
             err,
             Error::ShortRead {
-                expected: 16_384,
-                got: 15_360
+                expected: 1008,
+                got: 0
             }
         ),
         "{err:?}"
@@ -171,13 +174,13 @@ async fn lost_datagram_without_retry_reports_short_read() {
 #[tokio::test]
 async fn lost_datagram_mid_stream_is_retried_under_either_policy() {
     // The closing AckOk still arrives, so the shortfall is detected at once
-    // and nothing late can follow.
+    // and nothing late can follow, so Lenient is safe here too.
     let dev = device(big(Faults {
-        lose_data_packet_once: Some(5),
+        lose_data_packet_once: Some(0),
         ..Faults::default()
     }))
     .await;
-    let config = large(&dev).reply_id_policy(ReplyIdPolicy::Lenient);
+    let config = dev.config_udp().reply_id_policy(ReplyIdPolicy::Lenient);
     let mut client = Client::connect(config).await.unwrap();
     assert_eq!(client.users().await.unwrap().records, dev.state().users);
 }
@@ -189,7 +192,7 @@ async fn lost_stream_tail_stalls_into_short_read_and_retries() {
         ..Faults::default()
     }))
     .await;
-    let config = large(&dev).request_timeout(Duration::from_millis(150));
+    let config = dev.config_udp().request_timeout(Duration::from_millis(150));
     let mut client = Client::connect(config.clone().retry(RetryPolicy::NONE))
         .await
         .unwrap();
@@ -198,8 +201,8 @@ async fn lost_stream_tail_stalls_into_short_read_and_retries() {
         matches!(
             err,
             Error::ShortRead {
-                expected: 16_384,
-                got: 15_360
+                expected: 1008,
+                got: 0
             }
         ),
         "{err:?}"
@@ -218,7 +221,8 @@ async fn lost_stream_tail_under_lenient_is_a_timeout() {
         ..Faults::default()
     }))
     .await;
-    let config = large(&dev)
+    let config = dev
+        .config_udp()
         .request_timeout(Duration::from_millis(150))
         .reply_id_policy(ReplyIdPolicy::Lenient);
     let mut client = Client::connect(config).await.unwrap();
@@ -242,13 +246,13 @@ async fn lost_stream_tail_under_lenient_is_a_timeout() {
 #[tokio::test]
 async fn duplicated_datagram_is_an_overrun_and_retried() {
     let dev = device(big(Faults {
-        duplicate_data_packet_once: Some(2),
+        duplicate_data_packet_once: Some(0),
         ..Faults::default()
     }))
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     assert_eq!(client.users().await.unwrap().records, dev.state().users);
-    assert_eq!(read_buffer_requests(&dev).len(), 6, "five chunks, one retried");
+    assert_eq!(read_buffer_requests(&dev).len(), 73, "72 chunks, one retried");
 }
 
 #[tokio::test]
@@ -261,7 +265,7 @@ async fn lost_reply_to_simple_command_times_out_and_reconnects() {
         ..DeviceState::default()
     })
     .await;
-    let mut client = Client::connect(large(&dev).request_timeout(Duration::from_millis(100)))
+    let mut client = Client::connect(dev.config_udp().request_timeout(Duration::from_millis(100)))
         .await
         .unwrap();
     let err = client.time().await.unwrap_err();
@@ -290,7 +294,7 @@ async fn strict_reply_ids_over_udp() {
         ..DeviceState::default()
     })
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     assert_eq!(client.time().await.unwrap(), dev.state().time);
 }
 
@@ -301,7 +305,7 @@ async fn events_inside_udp_streams_are_kept() {
         ..Faults::default()
     }))
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     assert_eq!(client.users().await.unwrap().records, dev.state().users);
     let events = client.take_pending_events();
     assert_eq!(events.len(), dev.state().events_sent as usize);
@@ -315,7 +319,7 @@ async fn bulk_template_upload_over_udp() {
         ..DeviceState::default()
     })
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     let user = dev.state().users[1].clone();
     let fingers = templates(&[user.uid.0], 2500);
     client
@@ -344,7 +348,7 @@ async fn template_delete_by_user_id_resolves_uid_over_udp() {
         ..DeviceState::default()
     })
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
     assert!(client
         .delete_user_template_by_user_id(&"1002".into(), 0)
         .await
@@ -356,17 +360,6 @@ async fn template_delete_by_user_id_resolves_uid_over_udp() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::UserNotFound(_)));
-}
-
-#[tokio::test]
-async fn single_datagram_is_the_default() {
-    let dev = device(big(Faults::default())).await;
-    let mut client = Client::connect(dev.config_udp()).await.unwrap();
-    assert_eq!(client.users().await.unwrap().records, dev.state().users);
-    let reads = read_buffer_requests(&dev);
-    let total = 4 + 72 * u32::from(MANY_USERS);
-    assert_eq!(reads.len(), usize::try_from(total.div_ceil(1008)).unwrap());
-    assert!(reads.iter().all(|&(_, len)| len <= 1008), "{reads:?}");
 }
 
 #[tokio::test]
@@ -402,24 +395,38 @@ async fn reordered_datagrams_cannot_corrupt_single_datagram_reads() {
     assert_eq!(reads[0], reads[1], "first chunk read again");
 }
 
-/// Documents the failure `UdpChunking::Large` accepts: two `Data` datagrams
-/// swapped in transit give a chunk of the right length with the bytes in
-/// the wrong order. The read succeeds and the records are wrong.
 #[tokio::test]
-async fn large_chunks_accept_reordered_datagrams_silently() {
-    // The second and third Data packets of the first chunk: past the table's
-    // length prefix, so the layout is still detected.
-    let dev = device(big(Faults {
-        reorder_stream_once: Some(1),
-        ..Faults::default()
-    }))
+async fn stream_sample_reports_headers_only() {
+    let dev = device(DeviceState {
+        data_packet_len: 1024,
+        ..big(Faults::default())
+    })
     .await;
-    let mut client = Client::connect(large(&dev)).await.unwrap();
-    let got = client.users().await.unwrap();
+    let mut client = Client::connect(dev.config_udp()).await.unwrap();
+    let sample = client.sample_udp_stream(RawTable::Users).await.unwrap().unwrap();
+    assert!(sample.complete);
+    assert_eq!(sample.requested, 16_384);
+    let data: Vec<_> = sample
+        .packets
+        .iter()
+        .filter(|p| p.command == Command::Data)
+        .collect();
+    assert_eq!(data.len(), 16);
+    let seq: Vec<u16> = data.iter().map(|p| p.session_id).collect();
+    assert_eq!(seq, (0..16).collect::<Vec<u16>>(), "the mock numbers its packets");
+    assert!(data.iter().all(|p| p.reply_id == sample.request_reply_id));
+    assert_eq!(dev.commands().last(), Some(&Command::FreeData));
+    assert_eq!(client.users().await.unwrap().records, dev.state().users);
+
+    let small = device(DeviceState {
+        users: users(2),
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(small.config_udp()).await.unwrap();
     assert_eq!(
-        read_buffer_requests(&dev).len(),
-        5,
-        "no retry: nothing was detected"
+        client.sample_udp_stream(RawTable::Users).await.unwrap(),
+        None,
+        "inline"
     );
-    assert_ne!(got.records, dev.state().users, "corrupted data accepted");
 }

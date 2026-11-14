@@ -28,9 +28,6 @@ pub struct ClientConfig {
     /// TCP, UDP, or TCP with a fallback to UDP (default
     /// [`Transport::Auto`]).
     pub transport: Transport,
-    /// Chunk size for table reads over UDP (default
-    /// [`UdpChunking::SingleDatagram`]).
-    pub udp_chunking: UdpChunking,
     /// Refuse to send any command outside [`READ_ONLY_COMMANDS`] (default
     /// `false`). Such calls fail with [`Error::ReadOnly`](crate::Error::ReadOnly)
     /// before anything is sent.
@@ -76,27 +73,13 @@ pub enum Transport {
     /// TCP only.
     Tcp,
     /// UDP only (pyzk's `force_udp`).
+    ///
+    /// Table reads over UDP request one datagram's worth at a time, so each
+    /// reply is a single `Data` packet and reordering in transit cannot
+    /// corrupt it (DECISIONS.md D25). There is no option for larger chunks:
+    /// with no sequence number in UDP `Data` packets, a reordered chunk
+    /// would be accepted with its bytes in the wrong order.
     Udp,
-}
-
-/// How table reads are split over UDP.
-///
-/// UDP can reorder datagrams, and no source documents a sequence number in
-/// the device's UDP `Data` packets (DECISIONS.md D25).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UdpChunking {
-    /// Request at most one `Data` packet's worth at a time, so every reply
-    /// holds a single `Data` packet and reordering cannot corrupt it. If the
-    /// device still splits a reply, the chunk is discarded, the chunk size
-    /// shrinks to the device's packet size, and the chunk is read again.
-    /// Slower: one round trip per kilobyte.
-    #[default]
-    SingleDatagram,
-    /// Request 16 KiB chunks, as pyzk does. **Not safe against
-    /// reordering:** two `Data` datagrams swapped in transit give a chunk of
-    /// the right length with its bytes in the wrong order, and it is
-    /// accepted.
-    Large,
 }
 
 /// Commands a [`ClientConfig::read_only`] client may send. None of them
@@ -135,7 +118,6 @@ impl ClientConfig {
             host: host.into(),
             port: DEFAULT_PORT,
             transport: Transport::Auto,
-            udp_chunking: UdpChunking::SingleDatagram,
             read_only: false,
             password: None,
             connect_timeout: Duration::from_secs(5),
@@ -162,13 +144,6 @@ impl ClientConfig {
     #[must_use]
     pub fn transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
-        self
-    }
-
-    /// Set the UDP chunking mode.
-    #[must_use]
-    pub fn udp_chunking(mut self, chunking: UdpChunking) -> Self {
-        self.udp_chunking = chunking;
         self
     }
 

@@ -14,9 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use zkteco_client::compat::DeviceFacts;
 use zkteco_client::zkteco_proto::records::sizes::DeviceSizes;
-use zkteco_client::{
-    Client, ClientConfig, Error, RawTable, Recording, ReplyIdPolicy, Transport, UdpChunking,
-};
+use zkteco_client::{Client, ClientConfig, Error, RawTable, Recording, ReplyIdPolicy, Transport};
 use zkteco_proto::records::attendance::{self, AttendanceFormat};
 use zkteco_proto::records::options::keys;
 use zkteco_proto::records::user::{self, UserFormat};
@@ -54,11 +52,13 @@ pub struct Report {
     pub row: Row,
     /// Device details not in the row.
     pub device: Device,
-    /// One read of both tables per transport and chunking mode.
+    /// One read of both tables per transport.
     pub probes: Vec<Probe>,
-    /// What streamed UDP `Data` packets carry in their header (from the
-    /// 16 KiB UDP probe).
+    /// What streamed UDP `Data` packets carry in their header, from one
+    /// 16 KiB sample (headers only; no data is kept).
     pub udp_stream_headers: Option<StreamHeaders>,
+    /// Why there are no stream headers, if there are none.
+    pub udp_stream_note: Option<String>,
     /// Whether each UDP probe's table bytes equal the TCP probe's.
     pub udp_matches_tcp: Vec<Comparison>,
     /// Tool version.
@@ -117,7 +117,7 @@ pub struct Sizes {
     pub faces: Option<u32>,
 }
 
-/// One transport and chunking mode.
+/// One transport.
 #[derive(Debug, Clone, Serialize)]
 pub struct Probe {
     /// `tcp` or `udp`.
@@ -140,6 +140,8 @@ pub struct Probe {
     tables: [Option<Bytes>; 2],
     #[serde(skip)]
     recording: Recording,
+    #[serde(skip)]
+    stream: Option<Result<Option<StreamHeaders>, String>>,
 }
 
 /// One table read.
@@ -185,12 +187,8 @@ pub struct Outcome {
     pub captures: Vec<(String, Value)>,
 }
 
-/// The modes probed: TCP, UDP single-datagram, UDP 16 KiB.
-const MODES: [(Transport, UdpChunking, &str); 3] = [
-    (Transport::Tcp, UdpChunking::SingleDatagram, "64 KiB"),
-    (Transport::Udp, UdpChunking::SingleDatagram, "single datagram"),
-    (Transport::Udp, UdpChunking::Large, "16 KiB"),
-];
+/// The transports probed, with their chunking.
+const MODES: [(Transport, &str); 2] = [(Transport::Tcp, "64 KiB"), (Transport::Udp, "single datagram")];
 
 /// A read-only configuration for `opts`.
 #[must_use]
@@ -227,21 +225,27 @@ pub async fn run(opts: &Options) -> zkteco_client::Result<Outcome> {
         tracing::warn!(%e, "disconnect after the survey");
     }
     let mut probes = Vec::with_capacity(MODES.len());
-    for (transport, chunking, label) in MODES {
-        probes.push(probe(opts, transport, chunking, label, &sizes).await);
+    for (transport, label) in MODES {
+        probes.push(probe(opts, transport, label, &sizes).await);
     }
     let captures = if opts.capture {
         captures(&probes, &facts)
     } else {
         Vec::new()
     };
+    let stream = probes
+        .iter()
+        .find_map(|p| p.stream.clone())
+        .unwrap_or_else(|| Err("no UDP connection".into()));
     let report = Report {
         row: row(&facts, &probes, main_wire),
         device,
-        udp_stream_headers: probes
-            .iter()
-            .find(|p| p.chunking == MODES[2].2 && p.connect_error.is_none())
-            .map(|p| streams::analyse(&p.recording)),
+        udp_stream_headers: stream.clone().ok().flatten(),
+        udp_stream_note: match stream {
+            Ok(Some(_)) => None,
+            Ok(None) => Some("tables too small to stream (sent inline)".into()),
+            Err(e) => Some(e),
+        },
         udp_matches_tcp: compare(&probes),
         probes,
         tool: format!("zkctl {}", env!("CARGO_PKG_VERSION")),
@@ -282,14 +286,8 @@ fn wire_name(t: zkteco_proto::Transport) -> &'static str {
 
 /// Read both tables in one mode under Strict reply IDs; if that times out,
 /// once more under Lenient to tell "not echoed" from "unreachable".
-async fn probe(
-    opts: &Options,
-    transport: Transport,
-    chunking: UdpChunking,
-    label: &str,
-    sizes: &DeviceSizes,
-) -> Probe {
-    let strict = config(opts, transport).udp_chunking(chunking);
+async fn probe(opts: &Options, transport: Transport, label: &str, sizes: &DeviceSizes) -> Probe {
+    let strict = config(opts, transport);
     let mut p = read_tables(strict.clone(), label, sizes).await;
     p.reply_ids = if p.connect_error.is_some() {
         "unknown (no connection)".into()
@@ -334,6 +332,7 @@ async fn read_tables(config: ClientConfig, label: &str, sizes: &DeviceSizes) -> 
         live_events: 0,
         tables: [None, None],
         recording: Recording::default(),
+        stream: None,
     };
     let mut client = match Client::connect(config).await {
         Ok(c) => c,
@@ -350,12 +349,32 @@ async fn read_tables(config: ClientConfig, label: &str, sizes: &DeviceSizes) -> 
     p.discarded_replies = client.discarded_replies();
     p.live_events = client.take_pending_events().len();
     p.recording = client.take_recording();
+    if transport == "udp" {
+        let bigger =
+            if p.tables[1].as_ref().map_or(0, Bytes::len) > p.tables[0].as_ref().map_or(0, Bytes::len) {
+                RawTable::Attendance
+            } else {
+                RawTable::Users
+            };
+        p.stream = Some(sample(&mut client, bigger).await);
+    }
     if client.is_connected() {
         if let Err(e) = client.disconnect().await {
             tracing::warn!(%e, "disconnect after a probe");
         }
     }
     p
+}
+
+/// Sample one 16 KiB UDP stream of `which`; headers only.
+async fn sample(client: &mut Client, which: RawTable) -> Result<Option<StreamHeaders>, String> {
+    if !client.is_connected() {
+        client.reconnect().await.map_err(|e| e.to_string())?;
+    }
+    match client.sample_udp_stream(which).await {
+        Ok(s) => Ok(s.as_ref().map(streams::analyse)),
+        Err(e) => Err(format!("sampling failed: {e}")),
+    }
 }
 
 async fn read_table(client: &mut Client, which: RawTable, count: u32) -> (TableRead, Option<Bytes>) {

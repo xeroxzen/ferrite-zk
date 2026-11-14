@@ -44,7 +44,8 @@ ferrite-zk/
 │   │   │   ├── link.rs        # Link: framed TCP stream or connected UDP socket
 │   │   │   ├── compat.rs      # COMPATIBILITY table (mirrors docs/COMPATIBILITY.md), device facts
 │   │   │   ├── record.rs      # packet recording for diagnostics
-│   │   │   ├── config.rs      # ClientConfig, Transport, UdpChunking, RetryPolicy, READ_ONLY_COMMANDS
+│   │   │   ├── diag.rs        # UDP stream sampling (headers only)
+│   │   │   ├── config.rs      # ClientConfig, Transport, RetryPolicy, READ_ONLY_COMMANDS
 │   │   │   └── error.rs       # Error
 │   │   └── tests/
 │   │       ├── support/       # mock device with fault injection
@@ -57,7 +58,7 @@ ferrite-zk/
 │       │   ├── main.rs        # clap CLI
 │       │   ├── diagnose.rs    # read-only survey -> COMPATIBILITY row
 │       │   ├── capture.rs     # recording -> scrubbed capture JSON
-│       │   └── streams.rs     # header fields of streamed Data packets
+│       │   └── streams.rs     # describes a UDP stream sample
 │       └── tests/diagnose.rs  # against zkteco-client's mock (shared via #[path])
 ├── tests/fixtures/captures/   # maintainer's device captures (excluded from crates)
 ├── tools/                     # GPL-2.0-only fixture generator (never packaged)

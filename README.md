@@ -22,11 +22,11 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ARCHITECTURE.md](docs/ARCHITECTU
 ## Transports
 
 `ClientConfig::transport` defaults to `Transport::Auto`: TCP, falling back to
-UDP if the device cannot be reached over TCP. Over UDP, table reads default
-to one datagram per request (`UdpChunking::SingleDatagram`), because UDP
-can reorder datagrams and the protocol gives no way to detect it in larger
-chunks. `UdpChunking::Large` (16 KiB, as pyzk) is faster and unsafe against
-reordering (D25).
+UDP if the device cannot be reached over TCP. Over UDP, table reads request
+one datagram's worth at a time, because UDP can reorder datagrams and the
+protocol gives no known way to detect it in larger chunks. pyzk's 16 KiB UDP
+chunks are not offered: they can return wrong records without an error
+(D25).
 
 ## Surveying a device
 

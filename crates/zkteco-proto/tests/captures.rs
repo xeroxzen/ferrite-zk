@@ -65,9 +65,9 @@ fn ordered_packets(doc: &Value) -> Result<Vec<(Dir, Packet)>, String> {
         let bytes = hex::decode(hex).map_err(|e| format!("entry {i}: {e}"))?;
         let mut raws = Vec::new();
         if tcp {
-            let dec = &mut decoders[usize::from(dir == Dir::ToHost)];
-            dec.extend(&bytes);
-            while let Some(p) = dec.next_packet().map_err(|e| format!("entry {i}: {e}"))? {
+            let decoder = &mut decoders[usize::from(dir == Dir::ToHost)];
+            decoder.extend(&bytes);
+            while let Some(p) = decoder.next_packet().map_err(|e| format!("entry {i}: {e}"))? {
                 raws.push(p);
             }
         } else {

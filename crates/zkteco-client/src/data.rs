@@ -47,6 +47,16 @@ pub enum RawTable {
     Attendance,
 }
 
+impl RawTable {
+    /// The table command and selector that stage this table.
+    pub(crate) fn staging(self) -> (Command, u32) {
+        match self {
+            Self::Users => (Command::UserTempRrq, table::USERS),
+            Self::Attendance => (Command::AttLogRrq, 0),
+        }
+    }
+}
+
 /// The byte length a table announces in its `u32` prefix.
 fn announced_len(data: &[u8]) -> Result<usize> {
     let prefix: [u8; 4] = data
@@ -134,10 +144,8 @@ impl Client {
     ///
     /// Device, timeout or transfer errors.
     pub async fn raw_table(&mut self, which: RawTable) -> Result<Bytes> {
-        match which {
-            RawTable::Users => self.read_buffered(Command::UserTempRrq, table::USERS, 0).await,
-            RawTable::Attendance => self.read_buffered(Command::AttLogRrq, 0, 0).await,
-        }
+        let (command, selector) = which.staging();
+        self.read_buffered(command, selector, 0).await
     }
 
     /// All fingerprint templates.

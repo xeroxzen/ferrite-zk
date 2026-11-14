@@ -34,7 +34,7 @@ All integers are little-endian.
 ### 2.1 UDP [manual]
 
 One packet (section 3) per datagram. Datagrams can be large: a buffered read
-over UDP requests chunks of up to 16 KiB (section 7). A receiver must read
+over UDP may stream up to 16 KiB in answer to one request (section 7). A receiver must read
 with a buffer big enough for the largest datagram. A short buffer silently
 truncates.
 

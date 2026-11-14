@@ -8,7 +8,7 @@ use zkteco_proto::transfer::{self, ChunkReceiver, Progress};
 use zkteco_proto::{requests, Command, ProtoError, Transport};
 
 use crate::client::{failure, Client};
-use crate::config::{ReplyIdPolicy, UdpChunking};
+use crate::config::ReplyIdPolicy;
 use crate::error::{Error, Result};
 
 /// How long the line must stay quiet before a failed stream counts as
@@ -78,14 +78,14 @@ impl Client {
 
     /// The largest chunk to request now.
     fn chunk_len(&self) -> u32 {
-        match (self.transport(), self.config.udp_chunking) {
-            (Transport::Udp, UdpChunking::SingleDatagram) => self.udp_chunk,
-            (wire, _) => wire.max_read_chunk(),
+        match self.transport() {
+            Transport::Udp => self.udp_chunk,
+            Transport::Tcp => Transport::Tcp.max_read_chunk(),
         }
     }
 
     fn single_datagram(&self) -> bool {
-        self.transport() == Transport::Udp && self.config.udp_chunking == UdpChunking::SingleDatagram
+        self.transport() == Transport::Udp
     }
 
     /// Read one chunk at `start`, at most `remaining` bytes long, retrying

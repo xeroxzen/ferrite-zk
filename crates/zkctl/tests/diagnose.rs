@@ -53,7 +53,7 @@ async fn report_is_a_compatibility_row() {
         (r.device.serial_number.as_str(), r.device.mac.as_str()),
         (SCRUBBED, SCRUBBED)
     );
-    assert_eq!(r.probes.len(), 3);
+    assert_eq!(r.probes.len(), 2);
     for p in &r.probes {
         let users = p.users.as_ref().unwrap();
         assert_eq!((users.decoded, users.rejected), (Some(40), Some(0)), "{p:?}");
@@ -123,7 +123,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 async fn captures_are_scrubbed_and_valid() {
     let dev = device().await;
     let outcome = diagnose::run(&options(&dev)).await.unwrap();
-    assert_eq!(outcome.captures.len(), 3);
+    assert_eq!(outcome.captures.len(), 2);
     let originals = dev.state().users.clone();
     for (name, capture) in &outcome.captures {
         assert_eq!(capture["platform"], "MOCK_TFT", "{name}");
