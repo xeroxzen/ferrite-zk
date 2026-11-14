@@ -135,8 +135,8 @@ is ever dropped.
 
 `ChunkReceiver` checks the announced size against the requested size, TCP
 sequence numbers, short streams (`ShortRead`) and overruns. pyzk returns
-partial UDP data as success. The client will surface `ShortRead` as
-`Error::ShortRead { expected, got }` (phase 4). Orchestration (staging,
+partial UDP data as success. The client surfaces it as
+`Error::ShortRead { expected, got }` on both transports (D25). Orchestration (staging,
 chunk loop, retries, `FreeData`) lives in the client. `zkteco-proto`
 provides the plan (`chunk_plan`), the reply state machine and the payload
 codecs.
@@ -235,7 +235,8 @@ in CI and from an opt-in pre-commit hook (`.githooks/pre-commit`). Details in
 - **A timeout closes the connection.** Without it, a late reply could be
   read as the answer to the next request. The error is
   `Error::Timeout { command, after }`; later calls return `ConnectionClosed`
-  until `Client::reconnect`. I/O and TCP framing errors close it too. A bad
+  until `Client::reconnect`. I/O and TCP framing errors close it too. The
+  one exception is a UDP data stream that stalls under Strict (D25). A bad
   checksum under `ChecksumPolicy::Reject` does not, because the frame was
   consumed whole and the stream is still in sync.
 - **Reply IDs: `ReplyIdPolicy::Strict` by default.** A packet whose reply ID
@@ -316,3 +317,35 @@ cannot be swapped. There are no conversions between them. `UserId`
 dereferences to `str` and compares with `&str` for convenience.
 `requests::start_enroll_udp` now takes a `&UserId` and fails if it is not
 numeric.
+
+## D25. UDP transport (phase 4)
+
+- **Framing.** One packet per datagram, no prefix. The socket is connected
+  to the device address, so the OS drops datagrams from anywhere else.
+  Each receive uses a 64 KiB buffer, the largest possible datagram, so
+  nothing is truncated (pitfall 2).
+- **Chunks** are 16 KiB (`ReadBuffer` requests), against 0xFFC0 over TCP,
+  as pyzk. Within a chunk the device streams `Data` packets of its own size.
+- **Loss and duplication** are detected by size only. UDP `Data` packets
+  carry no known sequence number, so `ChunkReceiver` counts bytes: a missing
+  packet shows up as a short stream when the closing `AckOk` arrives, a
+  duplicate as an overrun. Both are retried like any corrupt chunk (D22).
+- **Reordering is undetectable.** Two packets swapped in transit give the
+  right byte count with the bytes in the wrong order, and the chunk is
+  accepted. The record decoders may reject the damaged records, or may not
+  (a swapped attendance block decodes as different, plausible records).
+  This is a known risk of UDP; prefer TCP where the device supports it. On
+  a single LAN segment reordering is rare.
+- **A stalled stream** (the tail of a chunk lost, so no `AckOk` arrives)
+  is the one timeout that does not close the connection: under
+  `ReplyIdPolicy::Strict`, once the stream has started, the client returns
+  a retryable `ShortRead { expected, got }`, drains, and re-requests the
+  chunk on the same socket. Strict reply IDs make this safe, because a late
+  packet from the abandoned stream carries the old reply ID and is
+  discarded. Under Lenient that guarantee is gone, so a stall is a fatal
+  `Timeout`, as on TCP. A stall before the stream starts is also a `Timeout`.
+- **`probe`** over UDP sends `Connect` and, if answered, `Exit`. There is
+  no UDP equivalent of a bare TCP connect.
+- **Template delete by user ID** over UDP resolves the `uid` from the user
+  table and sends `DeleteUserTemp` (as pyzk); command 134 is TCP only (D15).
+- **Hardware tests** run over UDP with `ZK_TRANSPORT=udp`.

@@ -29,15 +29,18 @@
 //!   [`Error::Timeout`] and closes the connection, so a late reply can never
 //!   be mistaken for the answer to a later request. Later calls return
 //!   [`Error::ConnectionClosed`] until [`Client::reconnect`].
-//! - Table reads stage the table on the device, read it in chunks (each
-//!   retried per [`RetryPolicy`] if its reply is malformed), and release it.
+//! - Table reads stage the table on the device, read it in chunks (64 KiB
+//!   over TCP, 16 KiB over UDP; each retried per [`RetryPolicy`] if its
+//!   reply is malformed or short), and release it.
+//! - TCP and UDP behave the same, except that over UDP a stream that stalls
+//!   mid-chunk (a lost datagram) is a retryable [`Error::ShortRead`] rather
+//!   than a connection-closing timeout.
 //! - Table decoding isolates bad records: see [`zkteco_proto::Batch`].
 //! - Live events that arrive while waiting for a reply are acknowledged and
 //!   queued, never dropped silently: see [`Client::take_pending_events`].
 //! - Users have two identities, [`Uid`] (device slot) and [`UserId`] (the ID
 //!   people see); they are distinct types.
 //! - Methods documented as **Destructive** change or erase device data.
-//! - Only TCP is implemented so far.
 //!
 //! Packets are logged with `tracing`: requests and replies at `trace` with
 //! hex dumps, recoveries at `warn`.

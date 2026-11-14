@@ -25,7 +25,7 @@ pub struct ClientConfig {
     pub host: String,
     /// Device port (default 4370).
     pub port: u16,
-    /// TCP or UDP (pyzk's `force_udp`). Only TCP is implemented so far.
+    /// TCP or UDP (pyzk's `force_udp`; default TCP).
     pub transport: Transport,
     /// Communication password (the device's "comm key"). `None` sends 0 if
     /// the device asks for authentication.

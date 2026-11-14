@@ -9,7 +9,7 @@ use support::{punches, templates, users, Delivery, DeviceState, Faults, MockDevi
 use zkteco_client::{Client, Error, ReplyIdPolicy, RetryPolicy, Uid, UserId, UserIdSource};
 use zkteco_proto::records::finger;
 use zkteco_proto::records::user::{Privilege, User, UserFormat};
-use zkteco_proto::{ChecksumPolicy, Command, ProtoError, TextEncoding, Transport};
+use zkteco_proto::{ChecksumPolicy, Command, ProtoError, TextEncoding};
 
 async fn device(state: DeviceState) -> MockDevice {
     MockDevice::start(state).await
@@ -121,15 +121,6 @@ async fn pre_check_probes_first() {
     assert!(client.is_connected());
     assert_eq!(dev.state().connections, 2);
     zkteco_client::probe(&dev.config()).await.unwrap();
-}
-
-#[tokio::test]
-async fn udp_is_not_implemented_yet() {
-    let dev = device(DeviceState::default()).await;
-    let err = Client::connect(dev.config().transport(Transport::Udp))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, Error::Unsupported(_)));
 }
 
 // ---- timeouts and typed errors -------------------------------------------

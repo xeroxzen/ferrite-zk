@@ -1,7 +1,7 @@
 //! Tests against a real device. Run with:
 //!
 //! ```sh
-//! ZK_HOST=192.168.1.201 [ZK_PORT=4370] [ZK_PASSWORD=0] \
+//! ZK_HOST=192.168.1.201 [ZK_PORT=4370] [ZK_PASSWORD=0] [ZK_TRANSPORT=udp] \
 //!     cargo test -p zkteco-client --features hardware --test hardware
 //! ```
 //!
@@ -30,6 +30,11 @@ fn config() -> ClientConfig {
     let mut config = ClientConfig::new(host);
     if let Ok(port) = std::env::var("ZK_PORT") {
         config = config.port(port.parse().expect("ZK_PORT is a port number"));
+    }
+    match std::env::var("ZK_TRANSPORT").as_deref() {
+        Ok("udp") => config = config.transport(zkteco_proto::Transport::Udp),
+        Ok("tcp") | Err(_) => {}
+        Ok(other) => panic!("ZK_TRANSPORT must be tcp or udp, not {other:?}"),
     }
     if let Ok(pw) = std::env::var("ZK_PASSWORD") {
         config = config.password(pw.parse().expect("ZK_PASSWORD is a number"));

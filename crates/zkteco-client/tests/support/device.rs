@@ -25,6 +25,10 @@ pub enum Delivery {
 
 /// Faults to inject. "Once" faults clear themselves after firing.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent test switches, set one at a time"
+)]
 pub struct Faults {
     pub delivery: Delivery,
     /// Send no reply to the next request with this command.
@@ -50,6 +54,15 @@ pub struct Faults {
     pub wrong_reply_id: Option<Command>,
     /// Insert a live event after every `Data` packet of every stream.
     pub events_in_streams: bool,
+    /// Leave out the `Data` packet with this index from the next stream (a
+    /// lost datagram).
+    pub lose_data_packet_once: Option<usize>,
+    /// Cut the next stream short: leave out its last `Data` packet and the
+    /// closing `AckOk` (the tail of a stream lost in transit).
+    pub lose_stream_tail_once: bool,
+    /// Send the `Data` packet with this index twice in the next stream (a
+    /// duplicated datagram).
+    pub duplicate_data_packet_once: Option<usize>,
 }
 
 impl Default for Faults {
@@ -67,6 +80,9 @@ impl Default for Faults {
             decoy_reply_once: None,
             wrong_reply_id: None,
             events_in_streams: false,
+            lose_data_packet_once: None,
+            lose_stream_tail_once: false,
+            duplicate_data_packet_once: None,
         }
     }
 }
@@ -343,16 +359,31 @@ impl DeviceState {
             data.pop();
         }
         let bad_seq = std::mem::take(&mut self.faults.bad_sequence_once);
+        let lose = self.faults.lose_data_packet_once.take();
+        let duplicate = self.faults.duplicate_data_packet_once.take();
         for (i, piece) in data.chunks(self.data_packet_len).enumerate() {
             let mut seq = u16::try_from(i).unwrap();
             if bad_seq && i == 1 {
                 seq += 7;
             }
+            if lose == Some(i) {
+                continue;
+            }
             out.push((Command::Data, seq, piece.to_vec()));
+            if duplicate == Some(i) {
+                out.push((Command::Data, seq, piece.to_vec()));
+            }
             if self.faults.events_in_streams {
                 // Placeholder; `handle` substitutes a real event packet.
                 out.push((Command::RegEvent, 0, Vec::new()));
             }
+        }
+        if std::mem::take(&mut self.faults.lose_stream_tail_once) {
+            let last_data = out.iter().rposition(|(c, _, _)| *c == Command::Data);
+            if let Some(i) = last_data {
+                out.truncate(i);
+            }
+            return out;
         }
         out.push((Command::AckOk, self.session_id, Vec::new()));
         out

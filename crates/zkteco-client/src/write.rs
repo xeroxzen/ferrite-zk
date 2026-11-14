@@ -3,7 +3,7 @@
 use zkteco_proto::records::finger::{self, Template};
 use zkteco_proto::records::options::keys;
 use zkteco_proto::records::user::{self, User, UserFormat};
-use zkteco_proto::{requests, Command, RecordKind, Uid, UserId};
+use zkteco_proto::{requests, Command, RecordKind, Transport, Uid, UserId};
 
 use crate::client::{failure, Client};
 use crate::error::{Error, Result};
@@ -63,15 +63,24 @@ impl Client {
         self.try_delete(Command::DeleteUserTemp, &payload).await
     }
 
-    /// **Destructive.** Delete one template by user ID and finger (command
-    /// 134, TCP only). Returns `false` if the device answers `AckError`.
+    /// **Destructive.** Delete one template by user ID and finger. Returns
+    /// `false` if the device answers `AckError`.
+    ///
+    /// Over TCP this sends command 134 with the user ID (unverified). Over
+    /// UDP, as pyzk, it resolves the `uid` from the user table and uses
+    /// [`delete_user_template`](Self::delete_user_template).
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] if the user ID does not fit; other failure
+    /// [`Error::InvalidArgument`] if the user ID does not fit;
+    /// [`Error::UserNotFound`] over UDP if no user has the ID; other failure
     /// replies; timeout or connection errors.
     #[doc = "Unverified against hardware."]
     pub async fn delete_user_template_by_user_id(&mut self, user_id: &UserId, fid: u8) -> Result<bool> {
+        if self.config.transport == Transport::Udp {
+            let uid = self.resolve_uid(user_id).await?;
+            return self.delete_user_template(uid, fid).await;
+        }
         let payload = requests::template_by_user_id(user_id, fid, self.config.encoding)
             .map_err(Error::InvalidArgument)?;
         self.try_delete(Command::DelUserTemp, &payload).await

@@ -7,7 +7,7 @@ a bare `zk` prefix, because on crates.io that means zero-knowledge proofs.
 | Crate | Type | Purpose | Status |
 |---|---|---|---|
 | `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 (phase 2, done) |
-| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP done (phase 3); unpublished |
+| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP and UDP done (phase 4); unpublished |
 | `zkctl` | bin | CLI for manual testing and ops against devices | unpublished; phase 6 |
 
 ## Workspace
@@ -41,12 +41,13 @@ ferrite-zk/
 │   │   │   ├── transfer.rs    # staged chunked reads, drain, uploads
 │   │   │   ├── data.rs        # users, attendance, templates
 │   │   │   ├── device.rs      # info, options, time, control commands
-│   │   │   ├── link.rs        # framed TCP socket
+│   │   │   ├── link.rs        # Link: framed TCP stream or connected UDP socket
 │   │   │   ├── config.rs      # ClientConfig, RetryPolicy
 │   │   │   └── error.rs       # Error
 │   │   └── tests/
 │   │       ├── support/       # mock device with fault injection
-│   │       ├── tcp.rs         # client against the mock
+│   │       ├── tcp.rs         # client against the mock over TCP
+│   │       ├── udp.rs         # client against the mock over UDP (loss, duplication)
 │   │       └── hardware.rs    # real device, --features hardware
 │   └── zkctl/                 # phase 6
 ├── tests/fixtures/captures/   # maintainer's device captures (excluded from crates)
@@ -82,9 +83,11 @@ ferrite-zk/
 - **Errors** (`zkteco_client::Error`): `Io`, `Timeout { command, after }`,
   `Unauthorized`, `DeviceError { command, reply }`, `Malformed(ProtoError)`,
   `UnsupportedRecordFormat { kind, detail }`, `ShortRead { expected, got }`,
-  `ConnectionClosed`, `Unsupported`, `InvalidArgument(ProtoError)`.
+  `ConnectionClosed`, `Unsupported`, `UserNotFound(UserId)`,
+  `InvalidArgument(ProtoError)`.
 - **Timeouts close the connection**; retries cover connecting and corrupt
-  chunks (D22).
+  chunks (D22). Over UDP a stream stalled mid-chunk is a retryable short
+  read instead (D25).
 - **Destructive operations** (`clear_attendance`, `clear_data`,
   `delete_user`, `set_user`, `poweroff`, `restart`) are tagged in rustdoc.
   `zkctl` requires `--yes` for them, and hardware tests run them only with

@@ -10,7 +10,7 @@ use zkteco_proto::{Command, ProtoError, Transport};
 
 use crate::config::{ClientConfig, ReplyIdPolicy};
 use crate::error::{Error, Result};
-use crate::link::TcpLink;
+use crate::link::{Link, TcpLink};
 
 /// Packets (events, mismatched replies) accepted at most while waiting for
 /// one reply.
@@ -28,7 +28,7 @@ const MAX_PACKETS_PER_REPLY: usize = 4096;
 #[derive(Debug)]
 pub struct Client {
     pub(crate) config: ClientConfig,
-    link: Option<TcpLink>,
+    link: Option<Link>,
     session: Session,
     /// User layout detected from the last user table read.
     pub(crate) detected_user_format: Option<UserFormat>,
@@ -49,12 +49,8 @@ impl Client {
     ///
     /// [`Error::Unauthorized`] if the password is rejected,
     /// [`Error::DeviceError`] for any other refusal, [`Error::Timeout`] or
-    /// [`Error::Io`] if the device cannot be reached, and
-    /// [`Error::Unsupported`] for UDP (not implemented yet).
+    /// [`Error::Io`] if the device cannot be reached.
     pub async fn connect(config: ClientConfig) -> Result<Self> {
-        if config.transport == Transport::Udp {
-            return Err(Error::Unsupported("UDP transport is not implemented yet"));
-        }
         if config.pre_check {
             probe(&config).await?;
         }
@@ -74,7 +70,7 @@ impl Client {
     }
 
     async fn connect_once(config: ClientConfig) -> Result<Self> {
-        let link = TcpLink::connect(&config.host, config.port, config.connect_timeout).await?;
+        let link = Link::connect(&config).await?;
         let mut client = Self {
             config,
             link: Some(link),
@@ -209,13 +205,29 @@ impl Client {
     /// [`ReplyIdPolicy::Lenient`], with a warning either way. A timeout,
     /// I/O or framing error closes the connection.
     pub(crate) async fn recv_reply(&mut self, command: Command, reply_id: u16) -> Result<Packet> {
-        let after = self.config.request_timeout;
-        let deadline = Instant::now() + after;
+        match self.wait_reply(command, reply_id).await? {
+            Some(packet) => Ok(packet),
+            None => Err(self.timed_out(command).await),
+        }
+    }
+
+    /// Close the connection and return the timeout error for `command`.
+    pub(crate) async fn timed_out(&mut self, command: Command) -> Error {
+        self.close().await;
+        Error::Timeout {
+            command,
+            after: self.config.request_timeout,
+        }
+    }
+
+    /// As [`recv_reply`](Self::recv_reply), but `None` when the deadline
+    /// passes, leaving the connection open for the caller to decide.
+    pub(crate) async fn wait_reply(&mut self, command: Command, reply_id: u16) -> Result<Option<Packet>> {
+        let deadline = Instant::now() + self.config.request_timeout;
         // The deadline ends the wait; the count bounds the loop regardless.
         for _ in 0..MAX_PACKETS_PER_REPLY {
             let Some(packet) = self.recv_by(deadline).await? else {
-                self.close().await;
-                return Err(Error::Timeout { command, after });
+                return Ok(None);
             };
             if packet.header.command == Command::RegEvent {
                 self.queue_event(&packet).await?;
@@ -223,18 +235,26 @@ impl Client {
             }
             let got = packet.header.reply_id;
             if got == reply_id {
-                return Ok(packet);
+                return Ok(Some(packet));
             }
+            let reply = packet.header.command;
             if self.config.reply_id_policy == ReplyIdPolicy::Lenient {
                 tracing::warn!(
                     ?command,
                     expected = reply_id,
                     got,
+                    ?reply,
                     "reply ID mismatch; accepted (lenient)"
                 );
-                return Ok(packet);
+                return Ok(Some(packet));
             }
-            tracing::warn!(?command, expected = reply_id, got, reply = ?packet.header.command, "reply ID mismatch; discarded");
+            tracing::warn!(
+                ?command,
+                expected = reply_id,
+                got,
+                ?reply,
+                "reply ID mismatch; discarded"
+            );
         }
         Err(Error::Malformed(ProtoError::UnexpectedReply {
             got: Command::RegEvent,
@@ -303,14 +323,24 @@ pub(crate) fn failure(command: Command, reply: Command) -> Error {
     }
 }
 
-/// Check that the device accepts TCP connections, without starting a
-/// session. This replaces pyzk's ping and TCP test; there is no ICMP.
+/// Check that the device is reachable. This replaces pyzk's ping and TCP
+/// test; there is no ICMP.
+///
+/// Over TCP: a TCP connect, without starting a session. Over UDP, which has
+/// no connection: `CMD_CONNECT` (and `CMD_AUTH` if asked) answered within the
+/// request timeout, then `CMD_EXIT`.
 ///
 /// # Errors
 ///
-/// [`Error::Timeout`] or [`Error::Io`] if the connection fails.
+/// [`Error::Timeout`] or [`Error::Io`] if the device does not answer; over
+/// UDP also the errors of [`Client::connect`].
 pub async fn probe(config: &ClientConfig) -> Result<()> {
-    let link = TcpLink::connect(&config.host, config.port, config.connect_timeout).await?;
-    link.shutdown().await;
-    Ok(())
+    match config.transport {
+        Transport::Tcp => {
+            let link = TcpLink::connect(&config.host, config.port, config.connect_timeout).await?;
+            link.shutdown().await;
+            Ok(())
+        }
+        Transport::Udp => Client::connect_once(config.clone()).await?.disconnect().await,
+    }
 }

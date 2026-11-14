@@ -5,9 +5,10 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use tokio::time::Instant;
 use zkteco_proto::transfer::{self, ChunkReceiver, Progress};
-use zkteco_proto::{requests, Command, ProtoError};
+use zkteco_proto::{requests, Command, ProtoError, Transport};
 
 use crate::client::{failure, Client};
+use crate::config::ReplyIdPolicy;
 use crate::error::{Error, Result};
 
 /// How long the line must stay quiet before a failed stream counts as
@@ -100,7 +101,9 @@ impl Client {
         let mut rx = ChunkReceiver::new(requested, self.config.transport);
         let limit = requested.map_or(MAX_UNSIZED_PACKETS, |r| r.saturating_add(3));
         for _ in 0..limit {
-            let packet = self.recv_reply(command, reply_id).await?;
+            let Some(packet) = self.wait_reply(command, reply_id).await? else {
+                return Err(self.stalled(command, &rx).await);
+            };
             let code = packet.header.command;
             if !code.is_success_reply() {
                 return Err(failure(command, code));
@@ -113,6 +116,33 @@ impl Client {
             got: Command::Data,
             context: "data stream did not end",
         }))
+    }
+
+    /// The error for a stream that went quiet before its reply completed.
+    ///
+    /// Over UDP with [`ReplyIdPolicy::Strict`], a stream that stalls after
+    /// `PrepareData` has most likely lost a datagram. That is a
+    /// [`Error::ShortRead`] (retryable) and the socket stays open: late
+    /// datagrams of this attempt carry its reply ID, so a retry discards
+    /// them. Otherwise it is a timeout, which closes the connection (D22).
+    async fn stalled(&mut self, command: Command, rx: &ChunkReceiver) -> Error {
+        let udp_strict =
+            self.config.transport == Transport::Udp && self.config.reply_id_policy == ReplyIdPolicy::Strict;
+        match rx.streaming_size() {
+            Some(expected) if udp_strict => {
+                tracing::warn!(
+                    ?command,
+                    expected,
+                    got = rx.received(),
+                    "UDP stream stalled; datagram lost"
+                );
+                Error::ShortRead {
+                    expected,
+                    got: rx.received(),
+                }
+            }
+            _ => self.timed_out(command).await,
+        }
     }
 
     /// After a failed stream, discard packets until `AckOk` or until the

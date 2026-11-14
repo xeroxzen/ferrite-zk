@@ -1,6 +1,7 @@
-//! A mock ZK device for tests: a tokio TCP server that speaks the protocol
-//! with `zkteco-proto`'s own codecs, keeps users, attendance and templates
-//! in memory, records every request, and injects faults on demand.
+//! A mock ZK device for tests: tokio TCP and UDP servers that speak the
+//! protocol with `zkteco-proto`'s own codecs, share one in-memory device
+//! (users, attendance, templates), record every request, and inject faults
+//! on demand.
 
 #![allow(dead_code, unreachable_pub)]
 
@@ -11,24 +12,27 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use zkteco_client::{ClientConfig, RetryPolicy};
 use zkteco_proto::framing::{encode_tcp, TcpFrameDecoder};
 use zkteco_proto::packet::{self, Packet};
-use zkteco_proto::{ChecksumPolicy, Command};
+use zkteco_proto::{ChecksumPolicy, Command, Transport};
 
 pub use device::{punches, templates, users, Delivery, DeviceState, Faults};
 
 /// A running mock device. Dropping it stops the server.
 pub struct MockDevice {
     pub addr: SocketAddr,
+    pub udp_addr: SocketAddr,
     state: Arc<Mutex<DeviceState>>,
     server: tokio::task::JoinHandle<()>,
+    udp_server: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for MockDevice {
     fn drop(&mut self) {
         self.server.abort();
+        self.udp_server.abort();
     }
 }
 
@@ -48,7 +52,21 @@ impl MockDevice {
                 tokio::spawn(serve(stream, Arc::clone(&shared)));
             }
         });
-        Self { addr, state, server }
+        let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind udp");
+        let udp_addr = udp.local_addr().expect("udp local addr");
+        let udp_server = tokio::spawn(serve_udp(udp, Arc::clone(&state)));
+        Self {
+            addr,
+            udp_addr,
+            state,
+            server,
+            udp_server,
+        }
+    }
+
+    /// As [`config`](Self::config), over UDP.
+    pub fn config_udp(&self) -> ClientConfig {
+        self.config().transport(Transport::Udp).port(self.udp_addr.port())
     }
 
     /// A client configuration for this device with short timeouts.
@@ -97,6 +115,32 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<DeviceState>>) {
                 .is_err()
                 || outcome.close
             {
+                return;
+            }
+        }
+    }
+}
+
+/// Serve datagrams: one request per datagram, one datagram per reply packet.
+/// Delivery modes do not apply. Each `CMD_CONNECT` counts as a connection.
+async fn serve_udp(socket: UdpSocket, state: Arc<Mutex<DeviceState>>) {
+    let mut buf = vec![0u8; 64 * 1024];
+    // Ends when the task is aborted or the socket fails.
+    loop {
+        let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+            return;
+        };
+        let raw = bytes::Bytes::copy_from_slice(&buf[..n]);
+        let request = packet::decode(raw, ChecksumPolicy::Reject).expect("client checksums are valid");
+        let outcome = {
+            let mut st = state.lock().unwrap();
+            if request.header.command == Command::Connect {
+                st.connections += 1;
+            }
+            st.handle(&request)
+        };
+        for reply in &outcome.replies {
+            if socket.send_to(reply, peer).await.is_err() {
                 return;
             }
         }

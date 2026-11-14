@@ -136,6 +136,16 @@ impl ChunkReceiver {
         }
     }
 
+    /// The size announced by `PrepareData`, once a stream has started and
+    /// until it completes.
+    #[must_use]
+    pub fn streaming_size(&self) -> Option<usize> {
+        match self.state {
+            State::Streaming { size, .. } => Some(size),
+            _ => None,
+        }
+    }
+
     /// Bytes collected so far.
     #[must_use]
     pub fn received(&self) -> usize {
@@ -267,6 +277,7 @@ mod tests {
     #[test]
     fn streamed_reply_tcp() {
         let mut r = ChunkReceiver::new(Some(5), Transport::Tcp);
+        assert_eq!(r.streaming_size(), None);
         let prep = PrepareData {
             size: 5,
             packet_size: Some(3),
@@ -276,6 +287,7 @@ mod tests {
             r.on_packet(&pkt(Command::PrepareData, 0, &prep)).unwrap(),
             Progress::NeedMore
         );
+        assert_eq!(r.streaming_size(), Some(5));
         assert_eq!(
             r.on_packet(&pkt(Command::Data, 0, b"abc")).unwrap(),
             Progress::NeedMore
@@ -288,6 +300,7 @@ mod tests {
             r.on_packet(&pkt(Command::AckOk, 0, b"")).unwrap(),
             Progress::Complete(Bytes::from_static(b"abcde"))
         );
+        assert_eq!(r.streaming_size(), None);
     }
 
     #[test]

@@ -567,7 +567,7 @@ These are behaviours to avoid, each with where the Rust port handles it.
 | # | Pitfall | Handling |
 |---|---|---|
 | 1 | TCP treated as one read per frame; split or merged frames mishandled | `framing::TcpFrameDecoder` |
-| 2 | UDP reads with small buffers truncate silently | client reads with large buffers (phase 3) |
+| 2 | UDP reads with small buffers truncate silently | client receives into a 64 KiB buffer, the largest datagram (D25) |
 | 3 | Short or lossy chunk streams returned as success | `ChunkReceiver` checks size and sequence (D10) |
 | 4 | Incoming checksums never checked | `ChecksumPolicy` (D2) |
 | 5 | Reachability via a shell `ping` built from the address string | no shelling out (D14) |
