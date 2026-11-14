@@ -238,6 +238,11 @@ Times are device-local wall-clock time. No zone is carried.
 `record size = table length / user count`, where the user count comes from
 `CMD_GET_FREE_SIZES` (section 13.1).
 
+No option or firmware value is known to identify the layout. With no users
+on the device, the layout cannot be measured. The reference implementation
+then assumes 72 bytes if the device is reachable over TCP and 28 otherwise,
+a guess (pitfall 6 in section 15).
+
 ### 9.2 28-byte record [ref] (unverified against hardware)
 
 | Off | Size | Field |

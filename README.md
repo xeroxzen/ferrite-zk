@@ -43,16 +43,16 @@ the mock device over TCP; UDP is phase 4.
 | `get_time` / `set_time` | `time` / `set_time` | `time`, `requests` | client (TCP) | yes | N |
 | `get_users` | `users` -> `Batch<User>` | `records::user` (28/72/120) | client (TCP) | yes | N |
 | `set_user` | `set_user` (destructive) | `user::encode_record` | client (TCP) | yes | N |
-| `delete_user` | `delete_user(uid)` (destructive) | `requests::delete_user` | client (TCP) | yes | N |
+| `delete_user` | `delete_user(Uid)`, `delete_user_by_user_id(&UserId)` (destructive) | `requests::delete_user` | client (TCP) | yes | N |
 | `next_uid` / `next_user_id` | `user::next_free_ids` | done | proto done | n/a | n/a |
 | `get_templates` | `templates` | `records::finger` | client (TCP) | yes | N |
-| `get_user_template` | `user_template(uid, fid)` | `finger::clean_single` | client (TCP) | yes | N |
+| `get_user_template` | `user_template(Uid, fid)`, `user_template_by_user_id(&UserId, fid)` | `finger::clean_single` | client (TCP) | yes | N |
 | `save_user_template`, `HR_save_usertemplates` | `save_user_templates` | `finger::encode_bulk_save` | client (TCP) | yes | N |
 | `delete_user_template` (by uid) | `delete_user_template` | `requests::template_by_uid` | client (TCP) | yes | N |
 | `delete_user_template` (by user ID, TCP) | `delete_user_template_by_user_id` | `requests::template_by_user_id` | client (TCP) | **yes, never exercised by pyzk** | N (on HW list) |
 | `enroll_user` | `enroll_user` | `requests::start_enroll_*`, `event::decode_enroll_report` | proto done; client phase 5 | yes | N |
 | `cancel_capture` / `verify_user` | same | commands | client (TCP) | yes | N |
-| `get_attendance` | `attendance` -> `AttendanceBatch` (no uid-to-user-ID join, D23) | `records::attendance` (8/16/40/49) | client (TCP) | yes | N |
+| `get_attendance` | `attendance` (as stored), `attendance_with_users` (user IDs resolved, D23) | `records::attendance` (8/16/40/49) | client (TCP) | yes | N |
 | `clear_attendance` / `clear_data` | same (destructive) | commands | client (TCP) | yes | N |
 | `live_capture` | `live_capture` -> `Stream` of `LiveEvent` | `records::event` (`LiveEvent`), `TcpFrameDecoder` | proto done; client phase 5 | yes | N |
 | `reg_event` | internal | `requests::reg_event` | proto done; client phase 5 | yes | N |

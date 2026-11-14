@@ -12,6 +12,7 @@ use crate::error::ProtoError;
 pub mod attendance;
 pub mod event;
 pub mod finger;
+pub mod ids;
 pub mod options;
 pub mod sizes;
 pub mod user;

@@ -6,6 +6,7 @@ use chrono::NaiveDateTime;
 
 use crate::command::{Command, EventFlags};
 use crate::error::{need, ProtoError, Result};
+use crate::records::ids::{Uid, UserId};
 use crate::records::u32_at;
 use crate::text::TextEncoding;
 use crate::time;
@@ -71,14 +72,14 @@ pub fn reg_event(flags: EventFlags) -> [u8; 4] {
 
 /// [`Command::DeleteUser`]: uid.
 #[must_use]
-pub fn delete_user(uid: u16) -> [u8; 2] {
-    uid.to_le_bytes()
+pub fn delete_user(uid: Uid) -> [u8; 2] {
+    uid.0.to_le_bytes()
 }
 
 /// [`Command::DeleteUserTemp`] and [`Command::GetUserTemp`]: uid and finger index.
 #[must_use]
-pub fn template_by_uid(uid: u16, fid: u8) -> [u8; 3] {
-    let u = uid.to_le_bytes();
+pub fn template_by_uid(uid: Uid, fid: u8) -> [u8; 3] {
+    let u = uid.0.to_le_bytes();
     [u[0], u[1], fid]
 }
 
@@ -88,9 +89,9 @@ pub fn template_by_uid(uid: u16, fid: u8) -> [u8; 3] {
 ///
 /// Fails if the user ID does not fit.
 #[doc = "Unverified against hardware."]
-pub fn template_by_user_id(user_id: &str, fid: u8, enc: TextEncoding) -> Result<Vec<u8>> {
+pub fn template_by_user_id(user_id: &UserId, fid: u8, enc: TextEncoding) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(25);
-    enc.encode_field("user_id", user_id, 24, &mut out)?;
+    enc.encode_field("user_id", user_id.as_str(), 24, &mut out)?;
     out.push(fid);
     Ok(out)
 }
@@ -102,19 +103,31 @@ pub fn template_by_user_id(user_id: &str, fid: u8, enc: TextEncoding) -> Result<
 ///
 /// Fails if the user ID does not fit.
 #[doc = "Unverified against hardware."]
-pub fn start_enroll_tcp(user_id: &str, fid: u8, enc: TextEncoding) -> Result<Vec<u8>> {
+pub fn start_enroll_tcp(user_id: &UserId, fid: u8, enc: TextEncoding) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(26);
-    enc.encode_field("user_id", user_id, 24, &mut out)?;
+    enc.encode_field("user_id", user_id.as_str(), 24, &mut out)?;
     out.extend_from_slice(&[fid, 1]);
     Ok(out)
 }
 
-/// [`Command::StartEnroll`] over UDP: numeric user ID and finger index.
+/// [`Command::StartEnroll`] over UDP: numeric user ID (`u32`) and finger
+/// index.
+///
+/// # Errors
+///
+/// [`ProtoError::InvalidField`] if the user
+/// ID is not a `u32`.
 #[doc = "Unverified against hardware."]
-#[must_use]
-pub fn start_enroll_udp(user_id: u32, fid: u8) -> [u8; 5] {
-    let u = user_id.to_le_bytes();
-    [u[0], u[1], u[2], u[3], fid]
+pub fn start_enroll_udp(user_id: &UserId, fid: u8) -> Result<[u8; 5]> {
+    let n: u32 = user_id
+        .as_str()
+        .parse()
+        .map_err(|_| crate::ProtoError::InvalidField {
+            field: "user_id",
+            reason: format!("{user_id:?} is not a u32"),
+        })?;
+    let u = n.to_le_bytes();
+    Ok([u[0], u[1], u[2], u[3], fid])
 }
 
 /// [`Command::PrepareBuffer`]: stage a data table for chunked reading.
@@ -218,7 +231,7 @@ mod tests {
             [1, 0, 0, b' ', b'H', b'i']
         );
         assert_eq!(write_lcd(0, "", TextEncoding::UTF8).unwrap(), [0, 0, 0, b' ']);
-        assert_eq!(template_by_uid(0x1234, 6), [0x34, 0x12, 6]);
+        assert_eq!(template_by_uid(Uid(0x1234), 6), [0x34, 0x12, 6]);
         assert_eq!(
             prepare_buffer(Command::DbRrq, 0x0403_0201, 0x0807_0605),
             [1, 7, 0, 1, 2, 3, 4, 5, 6, 7, 8]
@@ -233,7 +246,12 @@ mod tests {
             decode_read_buffer(&read_buffer(65472, 100)).unwrap(),
             (65472, 100)
         );
-        assert_eq!(start_enroll_tcp("12", 3, TextEncoding::UTF8).unwrap().len(), 26);
+        assert_eq!(
+            start_enroll_tcp(&"12".into(), 3, TextEncoding::UTF8)
+                .unwrap()
+                .len(),
+            26
+        );
         assert_eq!(decode_cstring(b"Ver 6.60\0x"), "Ver 6.60");
     }
 }

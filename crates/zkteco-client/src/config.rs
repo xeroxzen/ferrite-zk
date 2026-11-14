@@ -49,6 +49,22 @@ pub struct ClientConfig {
     pub user_format: Option<UserFormat>,
     /// Use this attendance record layout instead of detecting it.
     pub attendance_format: Option<AttendanceFormat>,
+    /// What to do with replies whose reply ID does not match the request
+    /// (default [`ReplyIdPolicy::Strict`]).
+    pub reply_id_policy: ReplyIdPolicy,
+    /// Live events kept while waiting for replies (default 1024). When full,
+    /// the oldest is dropped and counted.
+    pub pending_event_capacity: usize,
+}
+
+/// How to treat a reply whose reply ID does not match the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplyIdPolicy {
+    /// Log, discard, and keep waiting until the request times out.
+    #[default]
+    Strict,
+    /// Log and accept, for firmware that does not echo the reply ID.
+    Lenient,
 }
 
 impl ClientConfig {
@@ -68,6 +84,8 @@ impl ClientConfig {
             pre_check: false,
             user_format: None,
             attendance_format: None,
+            reply_id_policy: ReplyIdPolicy::Strict,
+            pending_event_capacity: 1024,
         }
     }
 
@@ -138,6 +156,20 @@ impl ClientConfig {
     #[must_use]
     pub fn user_format(mut self, format: UserFormat) -> Self {
         self.user_format = Some(format);
+        self
+    }
+
+    /// Set the reply-ID policy.
+    #[must_use]
+    pub fn reply_id_policy(mut self, policy: ReplyIdPolicy) -> Self {
+        self.reply_id_policy = policy;
+        self
+    }
+
+    /// Set the pending-event queue capacity.
+    #[must_use]
+    pub fn pending_event_capacity(mut self, capacity: usize) -> Self {
+        self.pending_event_capacity = capacity;
         self
     }
 

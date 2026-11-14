@@ -2,6 +2,7 @@
 
 use chrono::NaiveDateTime;
 
+use super::ids::{Uid, UserId};
 use super::{decode_fixed, split_table, u16_at, u32_at, Batch};
 use crate::error::{ProtoError, RecordKind, Result};
 use crate::text::TextEncoding;
@@ -179,10 +180,10 @@ impl Punch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attendance {
     /// Device-internal user index, when the layout carries it.
-    pub uid: Option<u16>,
+    pub uid: Option<Uid>,
     /// User ID string, when the layout carries it. The 8-byte layout does not;
     /// join on `uid` with the user table.
-    pub user_id: Option<String>,
+    pub user_id: Option<UserId>,
     /// Device-local time (no time zone).
     pub timestamp: NaiveDateTime,
     /// Verification method.
@@ -237,7 +238,7 @@ pub fn decode_record(rec: &[u8], format: AttendanceFormat, enc: TextEncoding) ->
     match format {
         // uid u16 | status u8 | time u32 | punch u8
         AttendanceFormat::Short8 => Ok(Attendance {
-            uid: Some(u16_at(rec, 0)),
+            uid: Some(Uid(u16_at(rec, 0))),
             user_id: None,
             status: AttendanceStatus::from_byte(rec[2]),
             timestamp: time::decode_packed(u32_at(rec, 3))?,
@@ -247,7 +248,7 @@ pub fn decode_record(rec: &[u8], format: AttendanceFormat, enc: TextEncoding) ->
         // user_id u32 | time u32 | status u8 | punch u8 | reserved[2] | workcode u32
         AttendanceFormat::Medium16 => Ok(Attendance {
             uid: None,
-            user_id: Some(u32_at(rec, 0).to_string()),
+            user_id: Some(UserId(u32_at(rec, 0).to_string())),
             timestamp: time::decode_packed(u32_at(rec, 4))?,
             status: AttendanceStatus::from_byte(rec[8]),
             punch: Punch::from_byte(rec[9]),
@@ -255,8 +256,8 @@ pub fn decode_record(rec: &[u8], format: AttendanceFormat, enc: TextEncoding) ->
         }),
         // uid u16 | user_id[24] | status u8 | time u32 | punch u8 | reserved[8]
         AttendanceFormat::Long40 => Ok(Attendance {
-            uid: Some(u16_at(rec, 0)),
-            user_id: Some(enc.decode_field(&rec[2..26])),
+            uid: Some(Uid(u16_at(rec, 0))),
+            user_id: Some(UserId(enc.decode_field(&rec[2..26]))),
             status: AttendanceStatus::from_byte(rec[26]),
             timestamp: time::decode_packed(u32_at(rec, 27))?,
             punch: Punch::from_byte(rec[31]),
@@ -284,13 +285,17 @@ pub fn encode_record(a: &Attendance, format: AttendanceFormat, enc: TextEncoding
     let mut out = Vec::with_capacity(format.record_len());
     match format {
         AttendanceFormat::Short8 => {
-            out.extend_from_slice(&a.uid.ok_or_else(|| missing("uid"))?.to_le_bytes());
+            out.extend_from_slice(&a.uid.ok_or_else(|| missing("uid"))?.0.to_le_bytes());
             out.push(a.status.to_byte());
             out.extend_from_slice(&t);
             out.push(a.punch.to_byte());
         }
         AttendanceFormat::Medium16 => {
-            let id = a.user_id.as_deref().ok_or_else(|| missing("user_id"))?;
+            let id = a
+                .user_id
+                .as_ref()
+                .map(UserId::as_str)
+                .ok_or_else(|| missing("user_id"))?;
             let id: u32 = id.parse().map_err(|_| ProtoError::InvalidField {
                 field: "user_id",
                 reason: format!("{id:?} is not a u32"),
@@ -306,8 +311,12 @@ pub fn encode_record(a: &Attendance, format: AttendanceFormat, enc: TextEncoding
             if format == AttendanceFormat::Long49 {
                 out.extend_from_slice(&PREFIX_49);
             }
-            out.extend_from_slice(&a.uid.ok_or_else(|| missing("uid"))?.to_le_bytes());
-            let id = a.user_id.as_deref().ok_or_else(|| missing("user_id"))?;
+            out.extend_from_slice(&a.uid.ok_or_else(|| missing("uid"))?.0.to_le_bytes());
+            let id = a
+                .user_id
+                .as_ref()
+                .map(UserId::as_str)
+                .ok_or_else(|| missing("user_id"))?;
             enc.encode_field("user_id", id, 24, &mut out)?;
             out.push(a.status.to_byte());
             out.extend_from_slice(&t);
@@ -346,8 +355,8 @@ mod tests {
         let has_uid = format != AttendanceFormat::Medium16;
         let has_user_id = format != AttendanceFormat::Short8;
         Attendance {
-            uid: has_uid.then_some(42),
-            user_id: has_user_id.then(|| "1001".to_string()),
+            uid: has_uid.then_some(Uid(42)),
+            user_id: has_user_id.then(|| "1001".into()),
             timestamp: NaiveDate::from_ymd_opt(2024, 2, 29)
                 .unwrap()
                 .and_hms_opt(8, 30, 5)

@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use tokio::time::Instant;
 use zkteco_proto::transfer::{self, ChunkReceiver, Progress};
 use zkteco_proto::{requests, Command, ProtoError};
 
@@ -75,23 +76,31 @@ impl Client {
     }
 
     async fn read_chunk_once(&mut self, start: u32, len: u32) -> Result<Bytes> {
-        self.send(Command::ReadBuffer, &requests::read_buffer(start, len))
-            .await?;
         let requested = usize::try_from(len).map_err(|_| Error::Unsupported("chunk larger than memory"))?;
-        self.receive_data(Command::ReadBuffer, Some(requested)).await
+        let reply_id = self
+            .send(Command::ReadBuffer, &requests::read_buffer(start, len))
+            .await?;
+        self.receive_data(Command::ReadBuffer, reply_id, Some(requested))
+            .await
     }
 
-    /// Collect a data reply after a request has been sent: inline `Data`, or
-    /// `PrepareData`, a stream of `Data` packets, and `AckOk`.
+    /// Collect the data reply to the request with `reply_id`: inline `Data`,
+    /// or `PrepareData`, a stream of `Data` packets, and `AckOk`. Each packet
+    /// gets its own request timeout.
     ///
     /// The loop is bounded by a packet count derived from the requested
     /// size; the total may not exceed the announced size, and on TCP each
     /// `Data` packet must carry the next sequence number.
-    pub(crate) async fn receive_data(&mut self, command: Command, requested: Option<usize>) -> Result<Bytes> {
+    pub(crate) async fn receive_data(
+        &mut self,
+        command: Command,
+        reply_id: u16,
+        requested: Option<usize>,
+    ) -> Result<Bytes> {
         let mut rx = ChunkReceiver::new(requested, self.config.transport);
         let limit = requested.map_or(MAX_UNSIZED_PACKETS, |r| r.saturating_add(3));
         for _ in 0..limit {
-            let packet = self.recv(command).await?;
+            let packet = self.recv_reply(command, reply_id).await?;
             let code = packet.header.command;
             if !code.is_success_reply() {
                 return Err(failure(command, code));
@@ -107,13 +116,15 @@ impl Client {
     }
 
     /// After a failed stream, discard packets until `AckOk` or until the
-    /// line is quiet, so the next request starts in sync.
+    /// line is quiet, so the next request starts in sync. Live events are
+    /// still acknowledged and queued, never discarded.
     pub(crate) async fn drain(&mut self) -> Result<()> {
         let quiet = DRAIN_QUIET.min(self.config.request_timeout);
         for _ in 0..MAX_DRAIN_PACKETS {
-            match self.try_recv_within(quiet).await {
+            match self.recv_by(Instant::now() + quiet).await {
                 Ok(None) => return Ok(()),
                 Ok(Some(p)) if p.header.command == Command::AckOk => return Ok(()),
+                Ok(Some(p)) if p.header.command == Command::RegEvent => self.queue_event(&p).await?,
                 Ok(Some(p)) => tracing::debug!(command = ?p.header.command, "drained packet"),
                 Err(e) if e.is_fatal() => return Err(e),
                 Err(e) => tracing::debug!(%e, "drained undecodable packet"),

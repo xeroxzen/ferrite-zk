@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 
+use super::ids::Uid;
 use super::user::{write_record, User, UserFormat};
 use super::{split_table, u16_at, Batch};
 use crate::error::{ProtoError, Result};
@@ -17,7 +18,7 @@ pub const MAX_FINGER_INDEX: u8 = 9;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Template {
     /// Owner's device-internal index.
-    pub uid: u16,
+    pub uid: Uid,
     /// Finger index, 0 to 9.
     pub fid: u8,
     /// Validity flag as stored (1 for a normal valid template on common
@@ -58,7 +59,7 @@ pub fn decode_table(data: &[u8]) -> Result<Batch<Template>> {
             break;
         }
         batch.records.push(Template {
-            uid: u16_at(rest, 2),
+            uid: Uid(u16_at(rest, 2)),
             fid: rest[4],
             valid: rest[5],
             data: Bytes::copy_from_slice(&rest[TABLE_ENTRY_HEADER..declared]),
@@ -92,7 +93,7 @@ pub fn encode_table(templates: &[Template]) -> Result<Vec<u8>> {
     for t in templates {
         let size = u16::try_from(t.data.len() + TABLE_ENTRY_HEADER).map_err(|_| too_large())?;
         body.extend_from_slice(&size.to_le_bytes());
-        body.extend_from_slice(&t.uid.to_le_bytes());
+        body.extend_from_slice(&t.uid.0.to_le_bytes());
         body.push(t.fid);
         body.push(t.valid);
         body.extend_from_slice(&t.data);
@@ -166,7 +167,7 @@ pub fn encode_bulk_save(
                 });
             }
             index.push(0x02);
-            index.extend_from_slice(&user.uid.to_le_bytes());
+            index.extend_from_slice(&user.uid.0.to_le_bytes());
             index.push(0x10 + t.fid);
             index.extend_from_slice(
                 &u32::try_from(templates.len())
@@ -208,7 +209,7 @@ mod tests {
 
     fn tmpl(uid: u16, fid: u8, len: usize) -> Template {
         Template {
-            uid,
+            uid: Uid(uid),
             fid,
             valid: 1,
             data: Bytes::from(
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn bulk_save_layout() {
         let user = User {
-            uid: 3,
+            uid: Uid(3),
             user_id: "3".into(),
             name: "x".into(),
             password: String::new(),

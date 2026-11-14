@@ -10,7 +10,7 @@ use zkteco_proto::records::options;
 use zkteco_proto::records::sizes::{index, DeviceSizes};
 use zkteco_proto::records::user::{self, User, UserFormat};
 use zkteco_proto::transfer::PrepareData;
-use zkteco_proto::{commkey, requests, time, Command, EventFlags, TextEncoding};
+use zkteco_proto::{commkey, requests, time, Command, EventFlags, TextEncoding, Uid, UserId};
 
 /// How reply frames are written to the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,13 @@ pub struct Faults {
     pub short_stream_once: bool,
     /// Give the second `Data` packet of the next stream a wrong sequence.
     pub bad_sequence_once: bool,
+    /// Send an `AckError` with a wrong reply ID before the real reply to the
+    /// next request with this command.
+    pub decoy_reply_once: Option<Command>,
+    /// Give every reply to this command a wrong reply ID.
+    pub wrong_reply_id: Option<Command>,
+    /// Insert a live event after every `Data` packet of every stream.
+    pub events_in_streams: bool,
 }
 
 impl Default for Faults {
@@ -57,6 +64,9 @@ impl Default for Faults {
             event_before: None,
             short_stream_once: false,
             bad_sequence_once: false,
+            decoy_reply_once: None,
+            wrong_reply_id: None,
+            events_in_streams: false,
         }
     }
 }
@@ -83,6 +93,8 @@ pub struct DeviceState {
     /// Every request received, in order.
     pub log: Vec<Packet>,
     pub connections: usize,
+    /// Live events sent so far (their user IDs count up from 1).
+    pub events_sent: u32,
     /// The last completed upload.
     pub uploaded: Option<Vec<u8>>,
     /// Upload buffers committed with `SaveUserTemps`.
@@ -122,6 +134,7 @@ impl Default for DeviceState {
             faults: Faults::default(),
             log: Vec::new(),
             connections: 0,
+            events_sent: 0,
             uploaded: None,
             saved_bulk: Vec::new(),
             authenticated: false,
@@ -161,10 +174,27 @@ impl DeviceState {
         if self.faults.event_before == Some(cmd) {
             replies.push(self.event_packet());
         }
+        let mut reply_id = request.header.reply_id;
+        if self.faults.decoy_reply_once == Some(cmd) {
+            self.faults.decoy_reply_once = None;
+            let decoy = packet::encode(
+                Command::AckError,
+                self.session_id,
+                reply_id.wrapping_add(1000),
+                &[],
+            );
+            replies.push(decoy.to_vec());
+        }
+        if self.faults.wrong_reply_id == Some(cmd) {
+            reply_id = reply_id.wrapping_add(1000);
+        }
         let (body, close) = self.dispatch(request);
-        let reply_id = request.header.reply_id;
         for (code, session, payload) in body {
-            replies.push(packet::encode(code, session, reply_id, &payload).to_vec());
+            if code == Command::RegEvent {
+                replies.push(self.event_packet());
+            } else {
+                replies.push(packet::encode(code, session, reply_id, &payload).to_vec());
+            }
         }
         if self.faults.bad_checksum_once == Some(cmd) {
             self.faults.bad_checksum_once = None;
@@ -175,10 +205,11 @@ impl DeviceState {
         Outcome { replies, close }
     }
 
-    fn event_packet(&self) -> Vec<u8> {
+    fn event_packet(&mut self) -> Vec<u8> {
+        self.events_sent += 1;
         let a = Attendance {
             uid: None,
-            user_id: Some("1".into()),
+            user_id: Some(UserId(self.events_sent.to_string())),
             timestamp: self.time,
             status: attendance::AttendanceStatus::Fingerprint,
             punch: attendance::Punch::CheckIn,
@@ -318,13 +349,17 @@ impl DeviceState {
                 seq += 7;
             }
             out.push((Command::Data, seq, piece.to_vec()));
+            if self.faults.events_in_streams {
+                // Placeholder; `handle` substitutes a real event packet.
+                out.push((Command::RegEvent, 0, Vec::new()));
+            }
         }
         out.push((Command::AckOk, self.session_id, Vec::new()));
         out
     }
 
     fn user_template(&mut self, p: &[u8]) -> Vec<(Command, u16, Vec<u8>)> {
-        let uid = u16::from_le_bytes([p[0], p[1]]);
+        let uid = Uid(u16::from_le_bytes([p[0], p[1]]));
         let fid = p[2];
         let Some(t) = self.templates.iter().find(|t| t.uid == uid && t.fid == fid) else {
             return self.reply(Command::AckError);
@@ -382,14 +417,18 @@ impl DeviceState {
             }
             Command::UserWrq => self.write_user(p),
             Command::DeleteUser => {
-                let uid = u16::from_le_bytes([p[0], p[1]]);
+                let uid = Uid(u16::from_le_bytes([p[0], p[1]]));
                 self.users.retain(|u| u.uid != uid);
                 self.ok(Vec::new())
             }
-            Command::DeleteUserTemp => self.delete_template(u16::from_le_bytes([p[0], p[1]]), p[2]),
+            Command::DeleteUserTemp => self.delete_template(Uid(u16::from_le_bytes([p[0], p[1]])), p[2]),
             Command::DelUserTemp => {
                 let id = self.encoding.decode_field(&p[..24]);
-                let uid = self.users.iter().find(|u| u.user_id == id).map(|u| u.uid);
+                let uid = self
+                    .users
+                    .iter()
+                    .find(|u| u.user_id == id.as_str())
+                    .map(|u| u.uid);
                 match uid {
                     Some(uid) => self.delete_template(uid, p[24]),
                     None => self.reply(Command::AckError),
@@ -437,7 +476,7 @@ impl DeviceState {
             self.users.push(u);
         }
         for e in index.chunks(8) {
-            let uid = u16::from_le_bytes([e[1], e[2]]);
+            let uid = Uid(u16::from_le_bytes([e[1], e[2]]));
             let fid = e[3] - 0x10;
             let off = u32::from_le_bytes([e[4], e[5], e[6], e[7]]) as usize;
             let len = usize::from(u16::from_le_bytes([temps[off], temps[off + 1]]));
@@ -481,7 +520,7 @@ impl DeviceState {
         }
     }
 
-    fn delete_template(&mut self, uid: u16, fid: u8) -> Vec<(Command, u16, Vec<u8>)> {
+    fn delete_template(&mut self, uid: Uid, fid: u8) -> Vec<(Command, u16, Vec<u8>)> {
         let before = self.templates.len();
         self.templates.retain(|t| !(t.uid == uid && t.fid == fid));
         if self.templates.len() < before {
@@ -496,8 +535,8 @@ impl DeviceState {
 pub fn users(n: u16) -> Vec<User> {
     (1..=n)
         .map(|uid| User {
-            uid,
-            user_id: format!("{}", 1000 + u32::from(uid)),
+            uid: Uid(uid),
+            user_id: UserId(format!("{}", 1000 + u32::from(uid))),
             name: format!("User {uid}"),
             password: String::new(),
             privilege: user::Privilege::User,
@@ -516,8 +555,8 @@ pub fn punches(n: u32) -> Vec<Attendance> {
         .unwrap();
     (0..n)
         .map(|i| Attendance {
-            uid: Some(u16::try_from(i % 50 + 1).unwrap()),
-            user_id: Some(format!("{}", 1001 + i % 50)),
+            uid: Some(Uid(u16::try_from(i % 50 + 1).unwrap())),
+            user_id: Some(UserId(format!("{}", 1001 + i % 50))),
             timestamp: base + chrono::Duration::minutes(i64::from(i)),
             status: attendance::AttendanceStatus::Fingerprint,
             punch: attendance::Punch::CheckIn,
@@ -530,7 +569,7 @@ pub fn punches(n: u32) -> Vec<Attendance> {
 pub fn templates(uids: &[u16], len: usize) -> Vec<Template> {
     uids.iter()
         .map(|&uid| Template {
-            uid,
+            uid: Uid(uid),
             fid: 0,
             valid: 1,
             data: Bytes::from(

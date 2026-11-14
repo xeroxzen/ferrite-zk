@@ -58,10 +58,10 @@ use chrono::NaiveDate;
 use zkteco_proto::records::attendance::{
     self, Attendance, AttendanceFormat, AttendanceStatus, Punch,
 };
-use zkteco_proto::TextEncoding;
+use zkteco_proto::{TextEncoding, Uid};
 
 let punch = Attendance {
-    uid: Some(7),
+    uid: Some(Uid(7)),
     user_id: Some("1007".into()),
     timestamp: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap().and_hms_opt(8, 59, 4).unwrap(),
     status: AttendanceStatus::Fingerprint,

@@ -23,13 +23,19 @@
 //!
 //! - One request is in flight at a time; methods take `&mut self`.
 //! - Every reply waits at most
-//!   [`ClientConfig::request_timeout`]. A timeout returns
+//!   [`ClientConfig::request_timeout`]. Under the default
+//!   [`ReplyIdPolicy::Strict`], packets with another reply ID are discarded
+//!   while waiting. A timeout returns
 //!   [`Error::Timeout`] and closes the connection, so a late reply can never
 //!   be mistaken for the answer to a later request. Later calls return
 //!   [`Error::ConnectionClosed`] until [`Client::reconnect`].
 //! - Table reads stage the table on the device, read it in chunks (each
 //!   retried per [`RetryPolicy`] if its reply is malformed), and release it.
 //! - Table decoding isolates bad records: see [`zkteco_proto::Batch`].
+//! - Live events that arrive while waiting for a reply are acknowledged and
+//!   queued, never dropped silently: see [`Client::take_pending_events`].
+//! - Users have two identities, [`Uid`] (device slot) and [`UserId`] (the ID
+//!   people see); they are distinct types.
 //! - Methods documented as **Destructive** change or erase device data.
 //! - Only TCP is implemented so far.
 //!
@@ -43,13 +49,16 @@ mod device;
 mod error;
 mod link;
 mod transfer;
+mod write;
 
 pub use client::{probe, Client};
-pub use config::{ClientConfig, RetryPolicy, DEFAULT_PORT};
+pub use config::{ClientConfig, ReplyIdPolicy, RetryPolicy, DEFAULT_PORT};
+pub use data::{ResolvedAttendance, UserIdSource};
 pub use device::NetworkParams;
 pub use error::{Error, Result};
 pub use zkteco_proto;
 pub use zkteco_proto::records::attendance::{Attendance, AttendanceBatch};
+pub use zkteco_proto::records::event::LiveEvent;
 pub use zkteco_proto::records::finger::Template;
 pub use zkteco_proto::records::user::{Privilege, User};
-pub use zkteco_proto::Batch;
+pub use zkteco_proto::{Batch, Uid, UserId};

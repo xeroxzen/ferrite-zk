@@ -10,7 +10,7 @@ use zkteco_proto::records::finger::{self, Template};
 use zkteco_proto::records::sizes::DeviceSizes;
 use zkteco_proto::records::user::{self, Privilege, User, UserFormat};
 use zkteco_proto::transfer::{ChunkReceiver, Progress};
-use zkteco_proto::{framing, packet, time, ChecksumPolicy, Command, TextEncoding, Transport};
+use zkteco_proto::{framing, packet, time, ChecksumPolicy, Command, TextEncoding, Transport, Uid, UserId};
 
 const ENC: TextEncoding = TextEncoding::UTF8;
 
@@ -71,8 +71,8 @@ fn user_for(format: UserFormat) -> BoxedStrategy<User> {
     )
         .prop_map(
             move |(uid, privilege, disabled, password, name, card, g, id, gs, ids)| User {
-                uid,
-                user_id: if compact { id.to_string() } else { ids },
+                uid: Uid(uid),
+                user_id: UserId(if compact { id.to_string() } else { ids }),
                 name,
                 password,
                 privilege,
@@ -104,9 +104,9 @@ fn attendance_for(format: AttendanceFormat) -> BoxedStrategy<Attendance> {
     )
         .prop_map(move |(uid, num_id, str_id, timestamp, status, punch, wc)| {
             let (uid, user_id, workcode) = match format {
-                AttendanceFormat::Short8 => (Some(uid), None, None),
-                AttendanceFormat::Medium16 => (None, Some(num_id.to_string()), Some(wc)),
-                _ => (Some(uid), Some(str_id), None),
+                AttendanceFormat::Short8 => (Some(Uid(uid)), None, None),
+                AttendanceFormat::Medium16 => (None, Some(UserId(num_id.to_string())), Some(wc)),
+                _ => (Some(Uid(uid)), Some(UserId(str_id)), None),
             };
             Attendance {
                 uid,
@@ -251,7 +251,7 @@ proptest! {
             EventRecordFormat::Numeric12 => n32.to_string(),
             _ => s,
         };
-        let a = Attendance { uid: None, user_id: Some(id), timestamp: t, status: st, punch: p, workcode: None };
+        let a = Attendance { uid: None, user_id: Some(UserId(id)), timestamp: t, status: st, punch: p, workcode: None };
         let rec = event::encode_record(&a, f, ENC).unwrap();
         let b = event::decode_attendance_payload(&rec, ENC);
         prop_assert!(b.is_clean());
@@ -262,7 +262,7 @@ proptest! {
     fn template_table_round_trip(ts in proptest::collection::vec(
         (any::<u16>(), 0u8..=9, any::<u8>(), proptest::collection::vec(any::<u8>(), 0..300)), 0..6)) {
         let ts: Vec<Template> = ts.into_iter()
-            .map(|(uid, fid, valid, data)| Template { uid, fid, valid, data: Bytes::from(data) })
+            .map(|(uid, fid, valid, data)| Template { uid: Uid(uid), fid, valid, data: Bytes::from(data) })
             .collect();
         let b = finger::decode_table(&finger::encode_table(&ts).unwrap()).unwrap();
         prop_assert!(b.is_clean());

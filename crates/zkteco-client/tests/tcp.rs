@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use support::{punches, templates, users, Delivery, DeviceState, Faults, MockDevice};
-use zkteco_client::{Client, Error, RetryPolicy};
+use zkteco_client::{Client, Error, ReplyIdPolicy, RetryPolicy, Uid, UserId, UserIdSource};
 use zkteco_proto::records::finger;
 use zkteco_proto::records::user::{Privilege, User, UserFormat};
 use zkteco_proto::{ChecksumPolicy, Command, ProtoError, TextEncoding, Transport};
@@ -475,17 +475,17 @@ async fn single_template_inline_streamed_and_missing() {
     .await;
     let mut client = Client::connect(dev.config()).await.unwrap();
     for uid in [1, 2] {
-        let t = client.user_template(uid, 0).await.unwrap().unwrap();
+        let t = client.user_template(Uid(uid), 0).await.unwrap().unwrap();
         let expected = dev
             .state()
             .templates
             .iter()
-            .find(|t| t.uid == uid)
+            .find(|t| t.uid == Uid(uid))
             .cloned()
             .unwrap();
         assert_eq!(t, expected);
     }
-    assert_eq!(client.user_template(9, 0).await.unwrap(), None);
+    assert_eq!(client.user_template(Uid(9), 0).await.unwrap(), None);
     assert!(client.is_connected());
 }
 
@@ -499,10 +499,16 @@ async fn delete_templates() {
     state.templates[1].fid = 3;
     let dev = device(state).await;
     let mut client = Client::connect(dev.config()).await.unwrap();
-    assert!(client.delete_user_template(1, 0).await.unwrap());
-    assert!(!client.delete_user_template(1, 0).await.unwrap());
-    assert!(client.delete_user_template_by_user_id("1002", 3).await.unwrap());
-    assert!(!client.delete_user_template_by_user_id("nobody", 3).await.unwrap());
+    assert!(client.delete_user_template(Uid(1), 0).await.unwrap());
+    assert!(!client.delete_user_template(Uid(1), 0).await.unwrap());
+    assert!(client
+        .delete_user_template_by_user_id(&"1002".into(), 3)
+        .await
+        .unwrap());
+    assert!(!client
+        .delete_user_template_by_user_id(&"nobody".into(), 3)
+        .await
+        .unwrap());
     assert!(dev.state().templates.is_empty());
 }
 
@@ -515,7 +521,7 @@ async fn save_user_templates_uploads_in_1k_packets() {
     .await;
     let mut client = Client::connect(dev.config()).await.unwrap();
     let user = dev.state().users[0].clone();
-    let fingers = templates(&[user.uid], 1500);
+    let fingers = templates(&[user.uid.0], 1500);
     client
         .save_user_templates(&[(user.clone(), fingers.clone())])
         .await
@@ -536,7 +542,7 @@ async fn save_user_templates_uploads_in_1k_packets() {
     want.extend([Command::SaveUserTemps, Command::RefreshData]);
     assert_eq!(cmds[start..], want[..]);
     assert_eq!(
-        client.user_template(1, 0).await.unwrap(),
+        client.user_template(Uid(1), 0).await.unwrap(),
         Some(fingers[0].clone())
     );
 }
@@ -545,7 +551,7 @@ async fn save_user_templates_uploads_in_1k_packets() {
 
 fn new_user(uid: u16) -> User {
     User {
-        uid,
+        uid: Uid(uid),
         user_id: "4242".into(),
         name: "Synthetic".into(),
         password: "12".into(),
@@ -567,7 +573,7 @@ async fn set_and_delete_user() {
     client.set_user(&new_user(50)).await.unwrap();
     assert!(dev.state().users.contains(&new_user(50)));
     assert_eq!(dev.commands().last(), Some(&Command::RefreshData));
-    client.delete_user(50).await.unwrap();
+    client.delete_user(Uid(50)).await.unwrap();
     assert_eq!(dev.state().users.len(), 2);
 }
 
@@ -669,4 +675,249 @@ async fn control_commands() {
     assert!(dev.state().attendance.is_empty());
     client.restart().await.unwrap();
     assert_eq!(dev.commands().last(), Some(&Command::Restart));
+}
+
+// ---- reply IDs -------------------------------------------------------------
+
+#[tokio::test]
+async fn strict_discards_mismatched_reply_then_accepts_matching() {
+    let dev = device(with_faults(Faults {
+        decoy_reply_once: Some(Command::GetTime),
+        ..Faults::default()
+    }))
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    assert_eq!(client.time().await.unwrap(), dev.state().time);
+    assert!(client.is_connected());
+}
+
+#[tokio::test]
+async fn strict_with_only_mismatched_replies_times_out() {
+    let dev = device(with_faults(Faults {
+        wrong_reply_id: Some(Command::GetTime),
+        ..Faults::default()
+    }))
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let err = client.time().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Timeout {
+                command: Command::GetTime,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn lenient_accepts_mismatched_replies() {
+    let dev = device(with_faults(Faults {
+        wrong_reply_id: Some(Command::GetTime),
+        decoy_reply_once: Some(Command::GetVersion),
+        ..Faults::default()
+    }))
+    .await;
+    let mut client = Client::connect(dev.config().reply_id_policy(ReplyIdPolicy::Lenient))
+        .await
+        .unwrap();
+    assert_eq!(client.time().await.unwrap(), dev.state().time);
+    let err = client.firmware_version().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::DeviceError {
+                reply: Command::AckError,
+                ..
+            }
+        ),
+        "the decoy is taken"
+    );
+}
+
+// ---- pending events --------------------------------------------------------
+
+fn event_ids(events: &[zkteco_client::LiveEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| match e {
+            zkteco_client::LiveEvent::Attendance(a) => a.user_id.clone().unwrap().0,
+            zkteco_client::LiveEvent::Raw { .. } => panic!("unexpected raw event"),
+        })
+        .collect()
+}
+
+async fn streaming_events_device(faults: Faults) -> MockDevice {
+    device(DeviceState {
+        users: users(MANY_USERS),
+        faults: Faults {
+            events_in_streams: true,
+            ..faults
+        },
+        ..DeviceState::default()
+    })
+    .await
+}
+
+#[tokio::test]
+async fn events_during_chunked_read_are_all_kept() {
+    let dev = streaming_events_device(Faults::default()).await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    assert_eq!(client.users().await.unwrap().records, dev.state().users);
+    let sent = dev.state().events_sent;
+    assert!(sent > 60, "two chunks of ~64 data packets each");
+    let events = client.take_pending_events();
+    let want: Vec<String> = (1..=sent).map(|i| i.to_string()).collect();
+    assert_eq!(event_ids(&events), want, "all events, oldest first");
+    assert_eq!(client.dropped_events(), 0);
+    assert!(client.take_pending_events().is_empty());
+    let acks = dev
+        .state()
+        .log
+        .iter()
+        .filter(|p| p.header.command == Command::AckOk)
+        .count();
+    assert_eq!(acks, sent as usize, "every event acknowledged");
+}
+
+#[tokio::test]
+async fn events_in_a_drained_stream_are_kept() {
+    let dev = streaming_events_device(Faults {
+        bad_sequence_once: true,
+        ..Faults::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    assert_eq!(client.users().await.unwrap().records, dev.state().users);
+    let sent = dev.state().events_sent;
+    assert_eq!(client.take_pending_events().len(), sent as usize);
+}
+
+#[tokio::test]
+async fn full_queue_drops_oldest_and_counts() {
+    let dev = streaming_events_device(Faults::default()).await;
+    let mut client = Client::connect(dev.config().pending_event_capacity(3))
+        .await
+        .unwrap();
+    client.users().await.unwrap();
+    let sent = dev.state().events_sent;
+    let events = client.take_pending_events();
+    let want: Vec<String> = (sent - 2..=sent).map(|i| i.to_string()).collect();
+    assert_eq!(event_ids(&events), want, "newest three kept");
+    assert_eq!(client.dropped_events(), u64::from(sent - 3));
+}
+
+// ---- layouts, attendance resolution, identities ----------------------------
+
+#[tokio::test]
+async fn undetectable_user_format_error_reports_evidence() {
+    let dev = device(DeviceState::default()).await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let Error::UnsupportedRecordFormat { detail, .. } = client.set_user(&new_user(1)).await.unwrap_err()
+    else {
+        panic!("expected UnsupportedRecordFormat");
+    };
+    assert!(detail.contains("Ver 6.60 Mock"), "{detail}");
+    assert!(detail.contains("~UserExtFmt=unavailable"), "{detail}");
+    assert!(detail.contains("ClientConfig::user_format"), "{detail}");
+    assert!(client.is_connected());
+}
+
+#[tokio::test]
+async fn attendance_with_users_resolves_and_flags() {
+    let dev = device(DeviceState {
+        users: users(40),
+        attendance: punches(100)
+            .into_iter()
+            .map(|mut a| {
+                a.user_id = None;
+                a
+            })
+            .collect(),
+        attendance_format: zkteco_proto::records::attendance::AttendanceFormat::Short8,
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let batch = client.attendance_with_users().await.unwrap();
+    assert_eq!(batch.records.len(), 100, "nothing dropped");
+    for r in &batch.records {
+        let uid = r.record.uid.unwrap();
+        if uid.0 <= 40 {
+            assert_eq!(r.source, UserIdSource::UserTable);
+            assert_eq!(
+                r.record.user_id,
+                Some(UserId(format!("{}", 1000 + u32::from(uid.0))))
+            );
+        } else {
+            assert_eq!(r.source, UserIdSource::Unresolved);
+            assert_eq!(r.record.user_id, None);
+        }
+    }
+    let raw = client.attendance().await.unwrap();
+    assert!(
+        raw.records.iter().all(|a| a.user_id.is_none()),
+        "raw records unchanged"
+    );
+}
+
+#[tokio::test]
+async fn attendance_with_users_skips_user_table_when_not_needed() {
+    let dev = device(DeviceState {
+        users: users(5),
+        attendance: punches(10),
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let batch = client.attendance_with_users().await.unwrap();
+    assert!(batch.records.iter().all(|r| r.source == UserIdSource::Record));
+    assert_eq!(
+        dev.count(Command::PrepareBuffer),
+        1,
+        "only the attendance table is read"
+    );
+}
+
+#[tokio::test]
+async fn user_template_only_none_for_ack_error() {
+    let dev = device(with_faults(Faults {
+        ack_unauth: Some(Command::GetUserTemp),
+        ..Faults::default()
+    }))
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    assert!(matches!(
+        client.user_template(Uid(1), 0).await,
+        Err(Error::Unauthorized)
+    ));
+    let dev = device(DeviceState::default()).await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    assert_eq!(client.user_template(Uid(1), 0).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn by_user_id_operations_resolve_or_report_not_found() {
+    let dev = device(DeviceState {
+        users: users(3),
+        templates: templates(&[2], 80),
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let t = client.user_template_by_user_id(&"1002".into(), 0).await.unwrap();
+    assert_eq!(t.map(|t| t.uid), Some(Uid(2)));
+    let missing = UserId::from("9999");
+    let err = client.user_template_by_user_id(&missing, 0).await.unwrap_err();
+    assert!(
+        matches!(err, Error::UserNotFound(ref id) if *id == missing),
+        "{err:?}"
+    );
+
+    client.delete_user_by_user_id(&"1003".into()).await.unwrap();
+    assert!(dev.state().users.iter().all(|u| u.uid != Uid(3)));
+    let err = client.delete_user_by_user_id(&missing).await.unwrap_err();
+    assert!(matches!(err, Error::UserNotFound(_)));
 }

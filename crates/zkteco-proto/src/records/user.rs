@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use super::ids::{Uid, UserId};
 use super::{decode_fixed, split_table, u16_at, u32_at, Batch};
 use crate::error::{ProtoError, RecordKind, Result};
 use crate::text::TextEncoding;
@@ -135,10 +136,10 @@ impl Privilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     /// Device-internal record index (1-based on most firmware).
-    pub uid: u16,
+    pub uid: Uid,
     /// The user ID shown on the device and printed on attendance records.
     /// Numeric in [`UserFormat::Compact28`].
-    pub user_id: String,
+    pub user_id: UserId,
     /// Display name exactly as stored; may be empty. See [`User::display_name`].
     pub name: String,
     /// Keypad password; may be empty.
@@ -213,7 +214,7 @@ pub fn decode_table_as(data: &[u8], format: UserFormat, enc: TextEncoding) -> Re
 /// [`ProtoError::InvalidField`] if `rec` has the wrong length.
 pub fn decode_record(rec: &[u8], format: UserFormat, enc: TextEncoding) -> Result<User> {
     super::check_len(rec, format.record_len())?;
-    let uid = u16_at(rec, 0);
+    let uid = Uid(u16_at(rec, 0));
     let privilege = Privilege::from_byte(rec[2]);
     let disabled = rec[2] & DISABLED_BIT != 0;
     Ok(match format {
@@ -227,7 +228,7 @@ pub fn decode_record(rec: &[u8], format: UserFormat, enc: TextEncoding) -> Resul
             name: enc.decode_field(&rec[8..16]),
             card: u32_at(rec, 16),
             group_id: rec[21].to_string(),
-            user_id: u32_at(rec, 24).to_string(),
+            user_id: UserId(u32_at(rec, 24).to_string()),
         },
         // uid u16 | privilege u8 | password[8] | name[24] | card u32 | flag u8 |
         // group[7] | pad | user_id[24]
@@ -239,7 +240,7 @@ pub fn decode_record(rec: &[u8], format: UserFormat, enc: TextEncoding) -> Resul
             name: enc.decode_field(&rec[11..35]),
             card: u32_at(rec, 35),
             group_id: enc.decode_field(&rec[40..47]),
-            user_id: enc.decode_field(&rec[48..72]),
+            user_id: UserId(enc.decode_field(&rec[48..72])),
         },
         // uid u16 | privilege u8 | password[8] | unknown[24] | first[24] |
         // last[24] | card u32 | unknown[9] | user_id[24]
@@ -259,7 +260,7 @@ pub fn decode_record(rec: &[u8], format: UserFormat, enc: TextEncoding) -> Resul
                 name,
                 card: u32_at(rec, 83),
                 group_id: String::new(),
-                user_id: enc.decode_field(&rec[96..120]),
+                user_id: UserId(enc.decode_field(&rec[96..120])),
             }
         }
     })
@@ -303,7 +304,7 @@ pub(crate) fn write_record(
     flag72: u8,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(format.record_len());
-    out.extend_from_slice(&user.uid.to_le_bytes());
+    out.extend_from_slice(&user.uid.0.to_le_bytes());
     out.push(user.writable_privilege_byte()?);
     match format {
         UserFormat::Compact28 => {
@@ -313,7 +314,9 @@ pub(crate) fn write_record(
             out.push(0);
             out.push(parse_number::<u8>("group_id", &user.group_id, true)?);
             out.extend_from_slice(&0i16.to_le_bytes());
-            out.extend_from_slice(&parse_number::<u32>("user_id", &user.user_id, false)?.to_le_bytes());
+            out.extend_from_slice(
+                &parse_number::<u32>("user_id", user.user_id.as_str(), false)?.to_le_bytes(),
+            );
         }
         UserFormat::Standard72 => {
             enc.encode_field("password", &user.password, 8, &mut out)?;
@@ -322,7 +325,7 @@ pub(crate) fn write_record(
             out.push(flag72);
             enc.encode_field("group_id", &user.group_id, 7, &mut out)?;
             out.push(0);
-            enc.encode_field("user_id", &user.user_id, 24, &mut out)?;
+            enc.encode_field("user_id", user.user_id.as_str(), 24, &mut out)?;
         }
         UserFormat::NgTeco120 => {
             return Err(ProtoError::Unsupported(
@@ -355,14 +358,14 @@ fn parse_number<T: std::str::FromStr + Default>(
 ///
 /// Returns `None` when the uid space is exhausted.
 #[must_use]
-pub fn next_free_ids(users: &[User]) -> Option<(u16, String)> {
-    let uid = users.iter().map(|u| u.uid).max().unwrap_or(0).checked_add(1)?;
+pub fn next_free_ids(users: &[User]) -> Option<(Uid, UserId)> {
+    let uid = users.iter().map(|u| u.uid.0).max().unwrap_or(0).checked_add(1)?;
     let taken: std::collections::HashSet<&str> = users.iter().map(|u| u.user_id.as_str()).collect();
     // At most users.len() + 1 candidates can be tried before one is free.
     (u64::from(uid)..=u64::from(uid) + users.len() as u64)
         .map(|n| n.to_string())
         .find(|id| !taken.contains(id.as_str()))
-        .map(|id| (uid, id))
+        .map(|id| (Uid(uid), UserId(id)))
 }
 
 #[cfg(test)]
@@ -371,7 +374,7 @@ mod tests {
 
     fn user() -> User {
         User {
-            uid: 7,
+            uid: Uid(7),
             user_id: "1234".into(),
             name: "Ada".into(),
             password: "99".into(),
@@ -478,16 +481,16 @@ mod tests {
 
     #[test]
     fn next_ids() {
-        assert_eq!(next_free_ids(&[]), Some((1, "1".into())));
+        assert_eq!(next_free_ids(&[]), Some((Uid(1), "1".into())));
         let mut a = user();
-        a.uid = 2;
+        a.uid = Uid(2);
         a.user_id = "3".into();
         let mut b = user();
-        b.uid = 1;
+        b.uid = Uid(1);
         b.user_id = "4".into();
-        assert_eq!(next_free_ids(&[a, b]), Some((3, "5".into())));
+        assert_eq!(next_free_ids(&[a, b]), Some((Uid(3), "5".into())));
         let mut full = user();
-        full.uid = u16::MAX;
+        full.uid = Uid(u16::MAX);
         assert_eq!(next_free_ids(&[full]), None);
     }
 }

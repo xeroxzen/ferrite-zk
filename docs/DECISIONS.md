@@ -229,50 +229,90 @@ unmarked files with template-sized payloads in template exchanges; it runs
 in CI and from an opt-in pre-commit hook (`.githooks/pre-commit`). Details in
 `tests/fixtures/captures/README.md`.
 
-## D22. Client request/reply discipline (phase 3)
+## D22. Client request/reply discipline (revised after phase 3 review)
 
 - **One request in flight**, `&mut self` methods, one `Client` per device.
 - **A timeout closes the connection.** Without it, a late reply could be
-  read as the answer to the next request (pyzk's failure mode). The error is
-  `Error::Timeout { command, after }`; later calls return
-  `ConnectionClosed` until `Client::reconnect`. I/O and TCP framing errors
-  close it too. A bad checksum under `ChecksumPolicy::Reject` does not: the
-  frame was consumed whole, so the stream is still in sync.
-- **Reply ID mismatches are logged and accepted.** No capture shows whether
-  every firmware echoes the reply ID; rejecting would break such devices.
-  Because a timeout closes the connection, a stale reply cannot arrive on a
-  live connection anyway.
-- **Stray live events** that arrive while waiting for a reply are
-  acknowledged (reply ID 0) and skipped, at most 256 per reply.
+  read as the answer to the next request. The error is
+  `Error::Timeout { command, after }`; later calls return `ConnectionClosed`
+  until `Client::reconnect`. I/O and TCP framing errors close it too. A bad
+  checksum under `ChecksumPolicy::Reject` does not, because the frame was
+  consumed whole and the stream is still in sync.
+- **Reply IDs: `ReplyIdPolicy::Strict` by default.** A packet whose reply ID
+  differs from the outstanding request's is logged at `warn`, discarded,
+  and the client keeps waiting until the request's original deadline (one
+  `request_timeout` from the start of the wait, not per packet). This applies
+  to every packet of a reply, including each packet of a data stream.
+  `ReplyIdPolicy::Lenient` (opt-in) logs and accepts the packet, for
+  firmware that does not echo the reply ID.
+  **Evidence:** pyzk's test fixtures show data-stream packets echoing the
+  request's reply ID, but one fixture ends a stream with an `AckOk` carrying
+  an earlier reply ID. Those fixtures are partly hand-made (many replies are
+  reused regardless of the request), so this is not conclusive. If hardware
+  shows chunked reads timing out under Strict, this is the first suspect,
+  and Lenient is the workaround.
+- **Live events that arrive mid-reply are never dropped silently.** They
+  are acknowledged (reply ID 0), decoded (`LiveEvent`, D9) and pushed onto a
+  bounded queue (`ClientConfig::pending_event_capacity`, default 1024),
+  including during a drain after a failed stream. `take_pending_events()`
+  returns them oldest first. When the queue is full the oldest event is
+  dropped, `dropped_events()` is incremented and a warning is logged. The
+  queue and the counter survive `reconnect`. Phase 5's live stream yields the
+  queued events before reading the socket.
 - **Retries** (`RetryPolicy`, default 3 attempts, as pyzk): connection-level
   failures while connecting, and malformed, short or refused chunk replies.
   Before a chunk retry the client drains the line until `AckOk` or 250 ms of
   silence. Authentication failures are never retried.
 - **`FreeData`** follows every staged read, including failed ones while the
   connection is open. An inline (`Data`) reply stages nothing, so no
-  `FreeData` is sent (as pyzk).
+  `FreeData` is sent (as pyzk). Kept after review.
 
-## D23. Client operation semantics (phase 3)
+## D23. Client operation semantics (revised after phase 3 review)
 
-- `users`/`attendance` detect the layout from the announced table length and
-  the count from `read_sizes`, unless `ClientConfig::user_format` /
-  `attendance_format` is set. The user layout is remembered for writes.
-  `set_user` and `save_user_templates` on a device with no users and no
-  configured layout fail with `UnsupportedRecordFormat` instead of guessing
-  (pyzk guesses 72 bytes from TCP reachability).
-- `attendance` does not fill user IDs into short (8/16-byte) records from
-  the user table, as pyzk does with an extra full user download. Join on
-  `uid` if needed.
-- `user_template` returns `None` when the device replies with a failure,
-  and retries only malformed replies. pyzk retries any failure three times
-  and then returns `None`.
-- `delete_user_template{,_by_user_id}` return `Ok(false)` for `AckError`
-  (pyzk: "probably empty"); other failures are errors.
+- **User layout.** `users`/`attendance` detect the layout from the announced
+  table length and the count from `read_sizes`, unless
+  `ClientConfig::user_format` / `attendance_format` is set. The user layout is
+  remembered for writes. For a write with no configured or remembered layout,
+  the client reads the user table. If the device has no users, it would next
+  try device information, but **neither PROTOCOL.md nor pyzk documents any
+  option or firmware value that identifies the layout**. pyzk's only
+  heuristic, "TCP reachable means 72 bytes", is pitfall 6 in PROTOCOL.md.
+  So detection is inconclusive and the write fails with
+  `UnsupportedRecordFormat`. The message includes the firmware version and
+  the `~UserExtFmt` and `~ExtendFmt` values and tells the caller to set
+  `user_format`. When hardware captures tie one of these values to a layout,
+  the rule goes in `write.rs::user_format_for_write`.
+- **Attendance.** `attendance()` returns records as stored. The explicit
+  `attendance_with_users()` reads the user table at most once (only if some
+  record lacks a user ID) and returns `Batch<ResolvedAttendance>`; each record
+  is tagged `UserIdSource::{Record, UserTable, Unresolved}`. Unresolved
+  records are kept with `user_id: None`. Rejected records pass through.
+- **Single templates.** `user_template` returns `Ok(None)` only for
+  `CMD_ACK_ERROR`, which is how devices report a missing template. The
+  protocol has no distinct "not found" code, so an `AckError` for another
+  reason is indistinguishable and also reads as `None`; that case is logged
+  at `debug`. Any other failure reply is an error and is not retried.
+  Malformed replies are retried.
+- **Template deletes** return `Ok(false)` for `AckError` (pyzk: "probably
+  empty"); other failures are errors.
+- **By-user-ID operations.** `delete_user_by_user_id` and
+  `user_template_by_user_id` resolve the `uid` from the user table and return
+  `Error::UserNotFound(UserId)` if no user has the ID. If several users share
+  an ID (corrupt table), the first is used and a warning is logged.
 - `lock_state` reports whether `CMD_DOORSTATE_RRQ` succeeded, as pyzk
   does. The payload is undecoded.
 - Option getters return the raw text. pyzk converts some to integers;
   `records::options::parse_int` is available.
 - `restart`, `poweroff` and `disconnect` consume the client.
-- Only TCP is implemented; `Transport::Udp` returns `Error::Unsupported`
-  until phase 4. Enrolment and live capture come in phase 5.
+- Enrolment and live capture come in phase 5.
 
+## D24. Identity types
+
+`Uid(u16)` (device slot) and `UserId(String)` (the ID people see) are
+distinct newtypes in `zkteco-proto` (`records::ids`, re-exported at the crate
+root and from `zkteco-client`). They are used by `User`, `Attendance`,
+`Template`, every request encoder and every client method, so the two
+cannot be swapped. There are no conversions between them. `UserId`
+dereferences to `str` and compares with `&str` for convenience.
+`requests::start_enroll_udp` now takes a `&UserId` and fails if it is not
+numeric.

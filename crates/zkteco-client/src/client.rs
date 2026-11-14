@@ -1,17 +1,20 @@
-use std::time::Duration;
+use std::collections::VecDeque;
 
+use tokio::time::Instant;
 use zkteco_proto::commkey;
 use zkteco_proto::packet::{self, Packet};
+use zkteco_proto::records::event::{self, LiveEvent};
 use zkteco_proto::records::user::UserFormat;
 use zkteco_proto::session::Session;
 use zkteco_proto::{Command, ProtoError, Transport};
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, ReplyIdPolicy};
 use crate::error::{Error, Result};
 use crate::link::TcpLink;
 
-/// Stray event packets tolerated while waiting for one reply.
-const MAX_STRAY_EVENTS: usize = 256;
+/// Packets (events, mismatched replies) accepted at most while waiting for
+/// one reply.
+const MAX_PACKETS_PER_REPLY: usize = 4096;
 
 /// A connection to one device.
 ///
@@ -29,6 +32,9 @@ pub struct Client {
     session: Session,
     /// User layout detected from the last user table read.
     pub(crate) detected_user_format: Option<UserFormat>,
+    /// Live events received while waiting for replies.
+    pending: VecDeque<LiveEvent>,
+    dropped_events: u64,
 }
 
 impl Client {
@@ -74,6 +80,8 @@ impl Client {
             link: Some(link),
             session: Session::new(),
             detected_user_format: None,
+            pending: VecDeque::new(),
+            dropped_events: 0,
         };
         client.handshake().await?;
         Ok(client)
@@ -119,14 +127,20 @@ impl Client {
     }
 
     /// Close the current connection, if any, and connect again with the
-    /// same configuration.
+    /// same configuration. Pending events and the dropped-event count are
+    /// kept.
     ///
     /// # Errors
     ///
     /// As for [`connect`](Self::connect).
     pub async fn reconnect(&mut self) -> Result<()> {
         self.close().await;
-        *self = Self::connect(self.config.clone()).await?;
+        let fresh = Self::connect(self.config.clone()).await?;
+        let pending = std::mem::take(&mut self.pending);
+        let dropped = self.dropped_events;
+        *self = fresh;
+        self.pending = pending;
+        self.dropped_events = dropped;
         Ok(())
     }
 
@@ -155,20 +169,10 @@ impl Client {
         }
     }
 
-    /// Send a request and return the first reply, whatever its code.
+    /// Send a request and return its reply, whatever its code.
     pub(crate) async fn request(&mut self, command: Command, payload: &[u8]) -> Result<Packet> {
         let reply_id = self.send(command, payload).await?;
-        let reply = self.recv(command).await?;
-        if reply.header.reply_id != reply_id {
-            // Accepted anyway: firmware is not known to echo it reliably.
-            tracing::warn!(
-                ?command,
-                expected = reply_id,
-                got = reply.header.reply_id,
-                "reply ID mismatch"
-            );
-        }
-        Ok(reply)
+        self.recv_reply(command, reply_id).await
     }
 
     /// Send a request and require a success reply (`AckOk`, `Data` or
@@ -182,63 +186,67 @@ impl Client {
         }
     }
 
+    /// Send a request; returns its reply ID.
     pub(crate) async fn send(&mut self, command: Command, payload: &[u8]) -> Result<u16> {
-        let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
         let (reply_id, bytes) = self.session.request(command, payload);
-        if let Err(e) = link.send(&bytes).await {
-            self.close().await;
-            return Err(e);
-        }
+        self.send_raw(&bytes).await?;
         Ok(reply_id)
     }
 
-    /// Receive the next packet that is not a live event, acknowledging any
-    /// events that arrive first. Any timeout, I/O or framing error closes
-    /// the connection.
-    pub(crate) async fn recv(&mut self, command: Command) -> Result<Packet> {
+    async fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
+        if let Err(e) = link.send(bytes).await {
+            self.close().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Wait up to one request timeout for the packet answering `reply_id`.
+    ///
+    /// Live events are acknowledged and queued. A packet with another reply
+    /// ID is discarded under [`ReplyIdPolicy::Strict`] and accepted under
+    /// [`ReplyIdPolicy::Lenient`], with a warning either way. A timeout,
+    /// I/O or framing error closes the connection.
+    pub(crate) async fn recv_reply(&mut self, command: Command, reply_id: u16) -> Result<Packet> {
         let after = self.config.request_timeout;
-        for _ in 0..MAX_STRAY_EVENTS {
-            let packet = self.recv_within(command, after).await?;
-            if packet.header.command != Command::RegEvent {
+        let deadline = Instant::now() + after;
+        // The deadline ends the wait; the count bounds the loop regardless.
+        for _ in 0..MAX_PACKETS_PER_REPLY {
+            let Some(packet) = self.recv_by(deadline).await? else {
+                self.close().await;
+                return Err(Error::Timeout { command, after });
+            };
+            if packet.header.command == Command::RegEvent {
+                self.queue_event(&packet).await?;
+                continue;
+            }
+            let got = packet.header.reply_id;
+            if got == reply_id {
                 return Ok(packet);
             }
-            tracing::debug!(flags = packet.header.session_id, "acknowledging stray event");
-            let ack = self.session.event_ack();
-            let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
-            if let Err(e) = link.send(&ack).await {
-                self.close().await;
-                return Err(e);
+            if self.config.reply_id_policy == ReplyIdPolicy::Lenient {
+                tracing::warn!(
+                    ?command,
+                    expected = reply_id,
+                    got,
+                    "reply ID mismatch; accepted (lenient)"
+                );
+                return Ok(packet);
             }
+            tracing::warn!(?command, expected = reply_id, got, reply = ?packet.header.command, "reply ID mismatch; discarded");
         }
         Err(Error::Malformed(ProtoError::UnexpectedReply {
             got: Command::RegEvent,
-            context: "too many events while waiting for a reply",
+            context: "too many unrelated packets while waiting for a reply",
         }))
     }
 
-    /// Receive one packet within `after`. A timeout becomes
-    /// [`Error::Timeout`] for `command` and closes the connection.
-    pub(crate) async fn recv_within(&mut self, command: Command, after: Duration) -> Result<Packet> {
+    /// Receive one packet before `deadline`. `None` on timeout, which leaves
+    /// the connection open; I/O and framing errors close it.
+    pub(crate) async fn recv_by(&mut self, deadline: Instant) -> Result<Option<Packet>> {
         let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
-        let raw = match tokio::time::timeout(after, link.recv()).await {
-            Ok(Ok(raw)) => raw,
-            Ok(Err(e)) => {
-                self.close().await;
-                return Err(e);
-            }
-            Err(_) => {
-                self.close().await;
-                return Err(Error::Timeout { command, after });
-            }
-        };
-        Ok(packet::decode(raw, self.config.checksum_policy)?)
-    }
-
-    /// Like [`recv_within`](Self::recv_within), but a timeout leaves the
-    /// connection open and returns `None`.
-    pub(crate) async fn try_recv_within(&mut self, after: Duration) -> Result<Option<Packet>> {
-        let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
-        match tokio::time::timeout(after, link.recv()).await {
+        match tokio::time::timeout_at(deadline, link.recv()).await {
             Ok(Ok(raw)) => Ok(Some(packet::decode(raw, self.config.checksum_policy)?)),
             Ok(Err(e)) => {
                 self.close().await;
@@ -246,6 +254,44 @@ impl Client {
             }
             Err(_) => Ok(None),
         }
+    }
+
+    /// Acknowledge a live event and add its contents to the pending queue,
+    /// dropping the oldest entries when it is full.
+    pub(crate) async fn queue_event(&mut self, packet: &Packet) -> Result<()> {
+        let ack = self.session.event_ack();
+        self.send_raw(&ack).await?;
+        let capacity = self.config.pending_event_capacity;
+        for event in event::decode(packet, self.config.encoding)? {
+            if self.pending.len() >= capacity {
+                self.pending.pop_front();
+                self.dropped_events += 1;
+                tracing::warn!(
+                    capacity,
+                    dropped_total = self.dropped_events,
+                    "pending event queue full; dropped the oldest event"
+                );
+                if capacity == 0 {
+                    continue;
+                }
+            }
+            self.pending.push_back(event);
+        }
+        Ok(())
+    }
+
+    /// Remove and return the live events that arrived while the client was
+    /// waiting for replies, oldest first. Each was acknowledged on arrival.
+    pub fn take_pending_events(&mut self) -> Vec<LiveEvent> {
+        self.pending.drain(..).collect()
+    }
+
+    /// Events dropped because the pending queue was full (see
+    /// [`ClientConfig::pending_event_capacity`]), since the client was
+    /// created.
+    #[must_use]
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events
     }
 }
 

@@ -1,14 +1,38 @@
 //! Users, attendance and fingerprint templates.
 
+use std::collections::HashMap;
+
 use zkteco_proto::command::table;
-use zkteco_proto::records::attendance::{self, AttendanceBatch, AttendanceFormat};
+use zkteco_proto::records::attendance::{self, Attendance, AttendanceBatch, AttendanceFormat};
 use zkteco_proto::records::finger::{self, Template};
 use zkteco_proto::records::user::{self, User, UserFormat};
-use zkteco_proto::{requests, Batch, Command, ProtoError, RecordKind};
+use zkteco_proto::{requests, Batch, Command, ProtoError, Uid, UserId};
 
-use crate::client::{failure, Client};
+use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::transfer::retryable;
+
+/// An attendance record with its user ID resolved where possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAttendance {
+    /// The record. `user_id` is filled in when it was resolved from the
+    /// user table.
+    pub record: Attendance,
+    /// Where `record.user_id` came from.
+    pub source: UserIdSource,
+}
+
+/// Where a [`ResolvedAttendance`]'s user ID came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserIdSource {
+    /// The attendance record itself carries it.
+    Record,
+    /// Looked up by `uid` in the user table.
+    UserTable,
+    /// Not resolved: the record has no user ID and its `uid` is missing or
+    /// matches no decoded user. `record.user_id` is `None`.
+    Unresolved,
+}
 
 /// The byte length a table announces in its `u32` prefix.
 fn announced_len(data: &[u8]) -> Result<usize> {
@@ -63,9 +87,10 @@ impl Client {
     ///
     /// The layout (8, 16, 40 or 49 bytes) comes from
     /// [`ClientConfig::attendance_format`](crate::ClientConfig::attendance_format)
-    /// or is detected. Short layouts carry only the device-internal `uid`;
-    /// unlike pyzk, user IDs are not filled in from the user table (join on
-    /// `uid` with [`users`](Self::users) if needed).
+    /// or is detected. Records are returned as stored: short layouts carry
+    /// only the device-internal `uid`. Use
+    /// [`attendance_with_users`](Self::attendance_with_users) to resolve
+    /// user IDs.
     ///
     /// # Errors
     ///
@@ -103,21 +128,66 @@ impl Client {
         Ok(finger::decode_table(&data)?)
     }
 
-    /// One template by user index and finger (0 to 9), or `None` if the
-    /// device reports an error for it (pyzk treats that as "no template").
+    /// All attendance records, with user IDs resolved from the user table
+    /// for records that carry only a `uid` (8-byte layout).
     ///
-    /// Malformed replies are retried per the retry policy.
+    /// The user table is read at most once, and only if some record needs
+    /// it. Records that cannot be resolved are kept and marked
+    /// [`UserIdSource::Unresolved`]; rejected records are passed through.
     ///
     /// # Errors
     ///
-    /// Timeout, connection, or repeated decoding errors.
-    pub async fn user_template(&mut self, uid: u16, fid: u8) -> Result<Option<Template>> {
+    /// As for [`attendance`](Self::attendance) and [`users`](Self::users).
+    pub async fn attendance_with_users(&mut self) -> Result<Batch<ResolvedAttendance>> {
+        let batch = self.attendance().await?;
+        let ids: HashMap<Uid, UserId> = if batch.records.iter().any(|a| a.user_id.is_none()) {
+            let users = self.users().await?.records;
+            users.into_iter().map(|u| (u.uid, u.user_id)).collect()
+        } else {
+            HashMap::new()
+        };
+        let records = batch
+            .records
+            .into_iter()
+            .map(|mut record| {
+                let source = if record.user_id.is_some() {
+                    UserIdSource::Record
+                } else if let Some(id) = record.uid.and_then(|uid| ids.get(&uid)) {
+                    record.user_id = Some(id.clone());
+                    UserIdSource::UserTable
+                } else {
+                    tracing::debug!(uid = ?record.uid, "attendance record with unresolved user");
+                    UserIdSource::Unresolved
+                };
+                ResolvedAttendance { record, source }
+            })
+            .collect();
+        Ok(Batch {
+            records,
+            rejected: batch.rejected,
+        })
+    }
+
+    /// One template by user index and finger (0 to 9).
+    ///
+    /// Returns `Ok(None)` when the device answers `CMD_ACK_ERROR`, which is
+    /// how it reports a missing template. The protocol has no separate "not
+    /// found" code, so `AckError` for any other reason also reads as `None`
+    /// (logged at debug; DECISIONS.md D23). Every other failure reply is an
+    /// error. Malformed replies are retried per the retry policy.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DeviceError`] for failure replies other than `AckError`;
+    /// timeout, connection, or repeated decoding errors.
+    pub async fn user_template(&mut self, uid: Uid, fid: u8) -> Result<Option<Template>> {
         let attempts = self.config.retry.attempts();
         let mut attempt = 1;
         loop {
-            self.send(Command::GetUserTemp, &requests::template_by_uid(uid, fid))
+            let reply_id = self
+                .send(Command::GetUserTemp, &requests::template_by_uid(uid, fid))
                 .await?;
-            match self.receive_data(Command::GetUserTemp, None).await {
+            match self.receive_data(Command::GetUserTemp, reply_id, None).await {
                 Ok(data) => {
                     let data = finger::clean_single(&data)?;
                     return Ok(Some(Template {
@@ -127,9 +197,15 @@ impl Client {
                         data,
                     }));
                 }
-                Err(Error::DeviceError { .. }) => return Ok(None),
-                Err(e) if retryable(&e) && attempt < attempts => {
-                    tracing::warn!(uid, fid, attempt, %e, "template read failed; retrying");
+                Err(Error::DeviceError {
+                    reply: Command::AckError,
+                    ..
+                }) => {
+                    tracing::debug!(%uid, fid, "AckError for a single template, read as \"no template\"");
+                    return Ok(None);
+                }
+                Err(e) if retryable(&e) && !matches!(e, Error::DeviceError { .. }) && attempt < attempts => {
+                    tracing::warn!(%uid, fid, attempt, %e, "template read failed; retrying");
                     self.drain().await?;
                     tokio::time::sleep(self.config.retry.backoff).await;
                     attempt += 1;
@@ -139,100 +215,28 @@ impl Client {
         }
     }
 
-    /// **Destructive.** Create or overwrite a user (`CMD_USER_WRQ`), then
-    /// refresh the device's data.
+    /// One template by user ID and finger, resolving the `uid` from the
+    /// user table.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] if a field does not fit the layout or the
-    /// privilege is [`Unknown`](zkteco_proto::records::user::Privilege::Unknown);
-    /// [`Error::UnsupportedRecordFormat`] if the layout is unknown (see
-    /// [`ClientConfig::user_format`](crate::ClientConfig::user_format));
-    /// device or timeout errors.
-    pub async fn set_user(&mut self, user: &User) -> Result<()> {
-        let format = self.user_format_for_write().await?;
-        let record =
-            user::encode_record(user, format, self.config.encoding).map_err(Error::InvalidArgument)?;
-        self.ack(Command::UserWrq, &record).await?;
-        self.refresh_data().await
+    /// [`Error::UserNotFound`] if no user has this ID; otherwise as for
+    /// [`user_template`](Self::user_template).
+    pub async fn user_template_by_user_id(&mut self, user_id: &UserId, fid: u8) -> Result<Option<Template>> {
+        let uid = self.resolve_uid(user_id).await?;
+        self.user_template(uid, fid).await
     }
 
-    /// **Destructive.** Delete a user by device index, then refresh.
-    ///
-    /// # Errors
-    ///
-    /// Device or timeout errors.
-    pub async fn delete_user(&mut self, uid: u16) -> Result<()> {
-        self.ack(Command::DeleteUser, &requests::delete_user(uid)).await?;
-        self.refresh_data().await
-    }
-
-    /// **Destructive.** Delete one template by user index and finger
-    /// (`CMD_DELETE_USERTEMP`). Returns `false` if the device refuses, which
-    /// usually means there was no such template.
-    ///
-    /// # Errors
-    ///
-    /// Timeout or connection errors.
-    pub async fn delete_user_template(&mut self, uid: u16, fid: u8) -> Result<bool> {
-        let payload = requests::template_by_uid(uid, fid);
-        self.try_delete(Command::DeleteUserTemp, &payload).await
-    }
-
-    /// **Destructive.** Delete one template by user ID and finger (command
-    /// 134, TCP only). Returns `false` if the device refuses.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] if the user ID does not fit; timeout or
-    /// connection errors.
-    #[doc = "Unverified against hardware."]
-    pub async fn delete_user_template_by_user_id(&mut self, user_id: &str, fid: u8) -> Result<bool> {
-        let payload = requests::template_by_user_id(user_id, fid, self.config.encoding)
-            .map_err(Error::InvalidArgument)?;
-        self.try_delete(Command::DelUserTemp, &payload).await
-    }
-
-    async fn try_delete(&mut self, command: Command, payload: &[u8]) -> Result<bool> {
-        let reply = self.request(command, payload).await?;
-        match reply.header.command {
-            Command::AckOk => Ok(true),
-            Command::AckError => Ok(false),
-            other => Err(failure(command, other)),
+    /// The `uid` of the user with `user_id`, from the user table.
+    pub(crate) async fn resolve_uid(&mut self, user_id: &UserId) -> Result<Uid> {
+        let users = self.users().await?.records;
+        let mut matches = users.iter().filter(|u| &u.user_id == user_id);
+        let first = matches
+            .next()
+            .ok_or_else(|| Error::UserNotFound(user_id.clone()))?;
+        if matches.next().is_some() {
+            tracing::warn!(%user_id, uid = %first.uid, "several users share this user ID; using the first");
         }
-    }
-
-    /// **Destructive.** Save users with their templates in one bulk upload
-    /// (`CMD_SAVE_USERTEMPS`), then refresh. Existing users with the same
-    /// `uid` are overwritten.
-    ///
-    /// # Errors
-    ///
-    /// As for [`set_user`](Self::set_user), plus [`Error::InvalidArgument`]
-    /// for a finger index above 9.
-    #[doc = "Unverified against hardware."]
-    pub async fn save_user_templates(&mut self, entries: &[(User, Vec<Template>)]) -> Result<()> {
-        let format = self.user_format_for_write().await?;
-        let buffer = finger::encode_bulk_save(entries, format, self.config.encoding)
-            .map_err(Error::InvalidArgument)?;
-        self.upload(&buffer).await?;
-        self.ack(Command::SaveUserTemps, &finger::SAVE_USER_TEMPS_PAYLOAD)
-            .await?;
-        self.refresh_data().await
-    }
-
-    /// The user layout for writes: configured, detected earlier, or detected
-    /// now by reading the user table.
-    async fn user_format_for_write(&mut self) -> Result<UserFormat> {
-        if let Some(f) = self.config.user_format.or(self.detected_user_format) {
-            return Ok(f);
-        }
-        self.users().await?;
-        self.detected_user_format
-            .ok_or_else(|| Error::UnsupportedRecordFormat {
-                kind: RecordKind::User,
-                detail: "the device has no users to detect the layout from; set ClientConfig::user_format"
-                    .into(),
-            })
+        Ok(first.uid)
     }
 }

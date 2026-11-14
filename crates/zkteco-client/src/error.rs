@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use zkteco_proto::{Command, ProtoError, RecordKind};
+use zkteco_proto::{Command, ProtoError, RecordKind, UserId};
 
 /// Result alias for this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -68,6 +68,10 @@ pub enum Error {
     /// The operation is not available with this configuration.
     #[error("unsupported: {0}")]
     Unsupported(&'static str),
+
+    /// No user has this user ID.
+    #[error("no user with user ID {0}")]
+    UserNotFound(UserId),
 
     /// An argument cannot be encoded for the device (for example a name too
     /// long for its field).

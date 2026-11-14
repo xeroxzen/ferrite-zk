@@ -3,6 +3,7 @@
 use bytes::Bytes;
 
 use super::attendance::{Attendance, AttendanceStatus, Punch};
+use super::ids::UserId;
 use super::{u16_at, u32_at, Batch};
 use crate::command::EventFlags;
 use crate::error::{ProtoError, RecordKind, Result};
@@ -240,7 +241,7 @@ pub fn decode_record(rec: &[u8], format: EventRecordFormat, enc: TextEncoding) -
     t.copy_from_slice(&rec[id_len + 2..id_len + 8]);
     Ok(Attendance {
         uid: None,
-        user_id: Some(user_id),
+        user_id: Some(UserId(user_id)),
         status: AttendanceStatus::from_byte(rec[id_len]),
         punch: Punch::from_byte(rec[id_len + 1]),
         timestamp: time::decode_compact(t)?,
@@ -255,10 +256,14 @@ pub fn decode_record(rec: &[u8], format: EventRecordFormat, enc: TextEncoding) -
 /// Fails if the user ID does not fit the layout or the timestamp cannot be
 /// represented.
 pub fn encode_record(a: &Attendance, format: EventRecordFormat, enc: TextEncoding) -> Result<Vec<u8>> {
-    let id = a.user_id.as_deref().ok_or(ProtoError::InvalidField {
-        field: "user_id",
-        reason: "required in events".into(),
-    })?;
+    let id = a
+        .user_id
+        .as_ref()
+        .map(UserId::as_str)
+        .ok_or(ProtoError::InvalidField {
+            field: "user_id",
+            reason: "required in events".into(),
+        })?;
     let numeric = |reason: &str| ProtoError::InvalidField {
         field: "user_id",
         reason: format!("{id:?} is not a {reason}"),

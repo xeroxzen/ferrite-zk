@@ -15,7 +15,7 @@ use zkteco_proto::records::sizes::DeviceSizes;
 use zkteco_proto::records::user::{self, Privilege, User, UserFormat};
 use zkteco_proto::records::{event, options};
 use zkteco_proto::{commkey, framing, packet, requests, time, transfer};
-use zkteco_proto::{ChecksumPolicy, Command, EventFlags, TextEncoding, Transport};
+use zkteco_proto::{ChecksumPolicy, Command, EventFlags, TextEncoding, Transport, Uid};
 
 const ENC: TextEncoding = TextEncoding::UTF8;
 
@@ -117,7 +117,7 @@ fn user_tables() {
         let expected = c["users"].as_array().unwrap();
         assert_eq!(batch.records.len(), expected.len());
         for (u, e) in batch.records.iter().zip(expected) {
-            assert_eq!(u.uid, num::<u16>(&e["uid"]));
+            assert_eq!(u.uid, Uid(num(&e["uid"])));
             assert_eq!(u.privilege_byte(), num::<u8>(&e["privilege"]));
             assert_eq!(u.password, s(&e["password"]));
             assert_eq!(u.display_name(), s(&e["name"]));
@@ -133,7 +133,7 @@ fn user_tables() {
 fn user_from(e: &Value) -> User {
     let p: u8 = num(&e["privilege"]);
     User {
-        uid: num(&e["uid"]),
+        uid: Uid(num(&e["uid"])),
         user_id: s(&e["user_id"]).into(),
         name: s(&e["name"]).into(),
         password: s(&e["password"]).into(),
@@ -171,13 +171,13 @@ fn attendance_tables() {
             assert_eq!(a.status.to_byte(), num::<u8>(&e["status"]));
             assert_eq!(a.punch.to_byte(), num::<u8>(&e["punch"]));
             match format {
-                AttendanceFormat::Short8 => assert_eq!(a.uid, Some(num(&e["uid"]))),
+                AttendanceFormat::Short8 => assert_eq!(a.uid, Some(Uid(num(&e["uid"])))),
                 AttendanceFormat::Medium16 => {
                     assert_eq!(a.user_id.as_deref(), Some(s(&e["user_id"])));
                     assert_eq!(a.workcode, Some(num(&c["workcodes"][i])));
                 }
                 AttendanceFormat::Long40 | AttendanceFormat::Long49 => {
-                    assert_eq!(a.uid, Some(num(&e["uid"])));
+                    assert_eq!(a.uid, Some(Uid(num(&e["uid"]))));
                     assert_eq!(a.user_id.as_deref(), Some(s(&e["user_id"])));
                 }
             }
@@ -215,7 +215,7 @@ fn template_tables() {
         let expected = c["templates"].as_array().unwrap();
         assert_eq!(batch.records.len(), expected.len());
         for (t, e) in batch.records.iter().zip(expected) {
-            assert_eq!(t.uid, num::<u16>(&e["uid"]));
+            assert_eq!(t.uid, Uid(num(&e["uid"])));
             assert_eq!(t.fid, num::<u8>(&e["fid"]));
             assert_eq!(t.valid, num::<u8>(&e["valid"]));
             assert_eq!(hex::encode(&t.data), s(&e["data"]));
@@ -230,7 +230,7 @@ fn template_tables() {
 #[test]
 fn single_templates() {
     for c in cases("single_templates") {
-        let req = requests::template_by_uid(num(&c["uid"]), num(&c["fid"]));
+        let req = requests::template_by_uid(Uid(num(&c["uid"])), num(&c["fid"]));
         assert_eq!(hex::encode(req), s(&c["request"]));
         let cleaned = finger::clean_single(&Bytes::from(hexv(&c["reply"]))).unwrap();
         assert_eq!(hex::encode(cleaned), s(&c["data"]));
@@ -383,9 +383,9 @@ fn command_payloads() {
             "test_voice" => requests::test_voice(arg(1)).to_vec(),
             "write_lcd" => requests::write_lcd(1, parts[2], ENC).unwrap(),
             "reg_event" => requests::reg_event(EventFlags::from_bits_retain(arg(1))).to_vec(),
-            "delete_user" => requests::delete_user(u16::try_from(arg(1)).unwrap()).to_vec(),
+            "delete_user" => requests::delete_user(Uid(u16::try_from(arg(1)).unwrap())).to_vec(),
             "delete_user_template" => {
-                requests::template_by_uid(u16::try_from(arg(1)).unwrap(), u8::try_from(arg(2)).unwrap())
+                requests::template_by_uid(Uid(u16::try_from(arg(1)).unwrap()), u8::try_from(arg(2)).unwrap())
                     .to_vec()
             }
             "get_pin_width" => requests::PIN_WIDTH_REQUEST.to_vec(),
@@ -398,8 +398,10 @@ fn command_payloads() {
                 };
                 requests::prepare_buffer(cmd, table, 0).to_vec()
             }
-            "enroll" if parts[1] == "tcp" => requests::start_enroll_tcp(parts[2], 3, ENC).unwrap(),
-            "enroll" => requests::start_enroll_udp(arg(2), 3).to_vec(),
+            "enroll" if parts[1] == "tcp" => requests::start_enroll_tcp(&parts[2].into(), 3, ENC).unwrap(),
+            "enroll" => requests::start_enroll_udp(&arg(2).to_string().into(), 3)
+                .unwrap()
+                .to_vec(),
             other => panic!("no encoder mapped for {other}"),
         };
         assert_eq!(hex::encode(ours), s(&c["payload"]), "{name}");
