@@ -8,7 +8,7 @@ a bare `zk` prefix, because on crates.io that means zero-knowledge proofs.
 |---|---|---|---|
 | `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 (phase 2, done) |
 | `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP and UDP done (phase 4); unpublished |
-| `zkctl` | bin | CLI for manual testing and ops against devices | unpublished; phase 6 |
+| `zkctl` | bin + lib | CLI for manual testing and ops against devices | `diagnose` done; rest phase 6; unpublished |
 
 ## Workspace
 
@@ -42,17 +42,26 @@ ferrite-zk/
 │   │   │   ├── data.rs        # users, attendance, templates
 │   │   │   ├── device.rs      # info, options, time, control commands
 │   │   │   ├── link.rs        # Link: framed TCP stream or connected UDP socket
-│   │   │   ├── config.rs      # ClientConfig, RetryPolicy
+│   │   │   ├── compat.rs      # COMPATIBILITY table (mirrors docs/COMPATIBILITY.md), device facts
+│   │   │   ├── record.rs      # packet recording for diagnostics
+│   │   │   ├── config.rs      # ClientConfig, Transport, UdpChunking, RetryPolicy, READ_ONLY_COMMANDS
 │   │   │   └── error.rs       # Error
 │   │   └── tests/
 │   │       ├── support/       # mock device with fault injection
 │   │       ├── tcp.rs         # client against the mock over TCP
-│   │       ├── udp.rs         # client against the mock over UDP (loss, duplication)
+│   │       ├── udp.rs         # client against the mock over UDP (loss, duplication, reordering)
+│   │       ├── modes.rs       # Transport::Auto, read-only mode
 │   │       └── hardware.rs    # real device, --features hardware
-│   └── zkctl/                 # phase 6
+│   └── zkctl/
+│       ├── src/
+│       │   ├── main.rs        # clap CLI
+│       │   ├── diagnose.rs    # read-only survey -> COMPATIBILITY row
+│       │   ├── capture.rs     # recording -> scrubbed capture JSON
+│       │   └── streams.rs     # header fields of streamed Data packets
+│       └── tests/diagnose.rs  # against zkteco-client's mock (shared via #[path])
 ├── tests/fixtures/captures/   # maintainer's device captures (excluded from crates)
 ├── tools/                     # GPL-2.0-only fixture generator (never packaged)
-├── docs/{PROTOCOL,ARCHITECTURE,DECISIONS}.md
+├── docs/{PROTOCOL,ARCHITECTURE,DECISIONS,COMPATIBILITY}.md
 └── .github/workflows/ci.yml   # fmt, clippy -D warnings, tests, docs, MSRV, fixture drift
 ```
 
@@ -84,7 +93,7 @@ ferrite-zk/
   `Unauthorized`, `DeviceError { command, reply }`, `Malformed(ProtoError)`,
   `UnsupportedRecordFormat { kind, detail }`, `ShortRead { expected, got }`,
   `ConnectionClosed`, `Unsupported`, `UserNotFound(UserId)`,
-  `InvalidArgument(ProtoError)`.
+  `ReadOnly(Command)`, `InvalidArgument(ProtoError)`.
 - **Timeouts close the connection**; retries cover connecting and corrupt
   chunks (D22). Over UDP a stream stalled mid-chunk is a retryable short
   read instead (D25).
@@ -100,6 +109,7 @@ ferrite-zk/
 - `zkteco-client`: `tokio` (net, time, io-util), plus the shared `bytes`,
   `chrono`, `thiserror`, `tracing`. Phase 5 adds `futures-core` for the
   live-capture stream.
-- `zkctl`, planned: `clap`, `anyhow`, `tracing-subscriber`.
+- `zkctl`: `clap`, `anyhow`, `serde`/`serde_json`, `hex`,
+  `tracing-subscriber`.
 
 Every crate uses `unsafe_code = "forbid"`. The MSRV is 1.88 (D19).

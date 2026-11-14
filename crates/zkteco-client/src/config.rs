@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::records::user::UserFormat;
-use zkteco_proto::{ChecksumPolicy, TextEncoding, Transport};
+use zkteco_proto::{ChecksumPolicy, Command, TextEncoding};
 
 /// The device's default port.
 pub const DEFAULT_PORT: u16 = 4370;
@@ -25,8 +25,16 @@ pub struct ClientConfig {
     pub host: String,
     /// Device port (default 4370).
     pub port: u16,
-    /// TCP or UDP (pyzk's `force_udp`; default TCP).
+    /// TCP, UDP, or TCP with a fallback to UDP (default
+    /// [`Transport::Auto`]).
     pub transport: Transport,
+    /// Chunk size for table reads over UDP (default
+    /// [`UdpChunking::SingleDatagram`]).
+    pub udp_chunking: UdpChunking,
+    /// Refuse to send any command outside [`READ_ONLY_COMMANDS`] (default
+    /// `false`). Such calls fail with [`Error::ReadOnly`](crate::Error::ReadOnly)
+    /// before anything is sent.
+    pub read_only: bool,
     /// Communication password (the device's "comm key"). `None` sends 0 if
     /// the device asks for authentication.
     pub password: Option<u32>,
@@ -57,6 +65,58 @@ pub struct ClientConfig {
     pub pending_event_capacity: usize,
 }
 
+/// Which transport to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transport {
+    /// Try TCP; if the device cannot be reached over TCP, use UDP. The
+    /// choice is logged at `info` and available from
+    /// [`Client::transport`](crate::Client::transport).
+    #[default]
+    Auto,
+    /// TCP only.
+    Tcp,
+    /// UDP only (pyzk's `force_udp`).
+    Udp,
+}
+
+/// How table reads are split over UDP.
+///
+/// UDP can reorder datagrams, and no source documents a sequence number in
+/// the device's UDP `Data` packets (DECISIONS.md D25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UdpChunking {
+    /// Request at most one `Data` packet's worth at a time, so every reply
+    /// holds a single `Data` packet and reordering cannot corrupt it. If the
+    /// device still splits a reply, the chunk is discarded, the chunk size
+    /// shrinks to the device's packet size, and the chunk is read again.
+    /// Slower: one round trip per kilobyte.
+    #[default]
+    SingleDatagram,
+    /// Request 16 KiB chunks, as pyzk does. **Not safe against
+    /// reordering:** two `Data` datagrams swapped in transit give a chunk of
+    /// the right length with its bytes in the wrong order, and it is
+    /// accepted.
+    Large,
+}
+
+/// Commands a [`ClientConfig::read_only`] client may send. None of them
+/// changes device data, settings or state: session control, reads, the
+/// staging and release of read buffers, and acknowledgements of live events.
+pub const READ_ONLY_COMMANDS: &[Command] = &[
+    Command::Connect,
+    Command::Auth,
+    Command::Exit,
+    Command::GetVersion,
+    Command::OptionsRrq,
+    Command::GetFreeSizes,
+    Command::GetTime,
+    Command::GetPinWidth,
+    Command::PrepareBuffer,
+    Command::ReadBuffer,
+    Command::FreeData,
+    Command::AckOk,
+];
+
 /// How to treat a reply whose reply ID does not match the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyIdPolicy {
@@ -74,7 +134,9 @@ impl ClientConfig {
         Self {
             host: host.into(),
             port: DEFAULT_PORT,
-            transport: Transport::Tcp,
+            transport: Transport::Auto,
+            udp_chunking: UdpChunking::SingleDatagram,
+            read_only: false,
             password: None,
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
@@ -100,6 +162,20 @@ impl ClientConfig {
     #[must_use]
     pub fn transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Set the UDP chunking mode.
+    #[must_use]
+    pub fn udp_chunking(mut self, chunking: UdpChunking) -> Self {
+        self.udp_chunking = chunking;
+        self
+    }
+
+    /// Enable or disable read-only mode.
+    #[must_use]
+    pub fn read_only(mut self, enabled: bool) -> Self {
+        self.read_only = enabled;
         self
     }
 
@@ -213,5 +289,100 @@ impl RetryPolicy {
 
     pub(crate) fn attempts(self) -> u32 {
         self.attempts.max(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command that writes, clears, deletes, changes settings or
+    /// device state, or starts an interactive mode. None may be allowed in
+    /// read-only mode.
+    const CHANGES_THE_DEVICE: &[Command] = &[
+        Command::UserWrq,
+        Command::UserTempWrq,
+        Command::OptionsWrq,
+        Command::ClearData,
+        Command::ClearAttLog,
+        Command::DeleteUser,
+        Command::DeleteUserTemp,
+        Command::ClearAdmin,
+        Command::UserGrpWrq,
+        Command::UserTzWrq,
+        Command::GrpTzWrq,
+        Command::TzWrq,
+        Command::UlgWrq,
+        Command::Unlock,
+        Command::ClearAcc,
+        Command::ClearOpLog,
+        Command::EnableClock,
+        Command::StartVerify,
+        Command::StartEnroll,
+        Command::CancelCapture,
+        Command::WriteLcd,
+        Command::ClearLcd,
+        Command::SmsWrq,
+        Command::DeleteSms,
+        Command::UDataWrq,
+        Command::DeleteUData,
+        Command::WriteMifare,
+        Command::EmptyMifare,
+        Command::SaveUserTemps,
+        Command::DelUserTemp,
+        Command::SetTime,
+        Command::RegEvent,
+        Command::EnableDevice,
+        Command::DisableDevice,
+        Command::Restart,
+        Command::PowerOff,
+        Command::Sleep,
+        Command::Resume,
+        Command::CaptureFinger,
+        Command::CaptureImage,
+        Command::RefreshData,
+        Command::RefreshOption,
+        Command::TestVoice,
+        Command::ChangeSpeed,
+        Command::PrepareData,
+        Command::Data,
+    ];
+
+    #[test]
+    fn read_only_allowlist_is_exactly_the_reviewed_set() {
+        let expected = [
+            (Command::Connect, "opens the session"),
+            (Command::Auth, "authenticates the session"),
+            (Command::Exit, "closes the session"),
+            (Command::GetVersion, "reads the firmware version"),
+            (Command::OptionsRrq, "reads one option"),
+            (Command::GetFreeSizes, "reads counters"),
+            (Command::GetTime, "reads the clock"),
+            (Command::GetPinWidth, "reads the user ID width"),
+            (Command::PrepareBuffer, "stages a table for reading"),
+            (Command::ReadBuffer, "reads a staged chunk"),
+            (Command::FreeData, "releases the read buffer"),
+            (Command::AckOk, "acknowledges a live event"),
+        ];
+        let allowed: Vec<_> = expected.iter().map(|(c, _)| *c).collect();
+        assert_eq!(READ_ONLY_COMMANDS, allowed.as_slice());
+    }
+
+    #[test]
+    fn read_only_allowlist_excludes_every_change() {
+        for command in CHANGES_THE_DEVICE {
+            assert!(!READ_ONLY_COMMANDS.contains(command), "{command:?} is allowed");
+        }
+        // Every code, named or not: only allowlisted ones pass.
+        for code in 0..=u16::MAX {
+            let command = Command::from(code);
+            if READ_ONLY_COMMANDS.contains(&command) {
+                assert!(!CHANGES_THE_DEVICE.contains(&command));
+                assert!(
+                    !matches!(command, Command::Unknown(_)),
+                    "{code} is not a named command"
+                );
+            }
+        }
     }
 }

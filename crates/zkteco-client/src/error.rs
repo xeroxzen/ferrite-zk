@@ -73,6 +73,12 @@ pub enum Error {
     #[error("no user with user ID {0}")]
     UserNotFound(UserId),
 
+    /// The client is read-only ([`ClientConfig::read_only`](crate::ClientConfig::read_only))
+    /// and this command is not in
+    /// [`READ_ONLY_COMMANDS`](crate::READ_ONLY_COMMANDS). Nothing was sent.
+    #[error("{0:?} refused: the client is read-only")]
+    ReadOnly(Command),
+
     /// An argument cannot be encoded for the device (for example a name too
     /// long for its field).
     #[error("invalid argument: {0}")]

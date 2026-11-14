@@ -811,7 +811,8 @@ async fn undetectable_user_format_error_reports_evidence() {
         panic!("expected UnsupportedRecordFormat");
     };
     assert!(detail.contains("Ver 6.60 Mock"), "{detail}");
-    assert!(detail.contains("~UserExtFmt=unavailable"), "{detail}");
+    assert!(detail.contains(r#"~UserExtFmt="unavailable""#), "{detail}");
+    assert!(detail.contains("COMPATIBILITY.md"), "{detail}");
     assert!(detail.contains("ClientConfig::user_format"), "{detail}");
     assert!(client.is_connected());
 }

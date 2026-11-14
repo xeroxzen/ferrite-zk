@@ -3,19 +3,46 @@
 A Rust implementation of the ZKTeco device protocol (port 4370, TCP and UDP),
 built for feature parity with [pyzk](https://github.com/fananimi/pyzk).
 
-**Status:** phase 4 of 6. `zkteco-proto` (the sans-IO protocol layer) is
-implemented and tested, version `0.1.0-alpha.1`. `zkteco-client` works over
-TCP and UDP (tested against a mock device; not yet published). Live capture,
-enrolment and `zkctl` are still to come.
+**Status:** phase 4 of 6, plus `zkctl diagnose`. `zkteco-proto` (the
+sans-IO protocol layer) is implemented and tested, version `0.1.0-alpha.1`.
+`zkteco-client` works over TCP and UDP (tested against a mock device; not
+yet published). Live capture, enrolment and the rest of `zkctl` are still to
+come.
 
 | Crate | Purpose |
 |---|---|
 | [`zkteco-proto`](crates/zkteco-proto) | Packets, checksums, comm key, record layouts, time encoding. No I/O. |
 | [`zkteco-client`](crates/zkteco-client) | Async tokio client (TCP and UDP) |
-| [`zkctl`](crates/zkctl) | CLI for manual testing (planned) |
+| [`zkctl`](crates/zkctl) | CLI; `zkctl diagnose` so far (read-only) |
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-and [docs/DECISIONS.md](docs/DECISIONS.md).
+See [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[docs/DECISIONS.md](docs/DECISIONS.md) and
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## Transports
+
+`ClientConfig::transport` defaults to `Transport::Auto`: TCP, falling back to
+UDP if the device cannot be reached over TCP. Over UDP, table reads default
+to one datagram per request (`UdpChunking::SingleDatagram`), because UDP
+can reorder datagrams and the protocol gives no way to detect it in larger
+chunks. `UdpChunking::Large` (16 KiB, as pyzk) is faster and unsafe against
+reordering (D25).
+
+## Surveying a device
+
+`zkctl diagnose` connects read-only (the client refuses any command outside
+an allowlist) and prints a JSON report shaped like a
+[COMPATIBILITY.md](docs/COMPATIBILITY.md) row:
+
+```sh
+ZK_PASSWORD=0 cargo run -p zkctl -- diagnose 192.168.1.201 \
+    --capture ./captures -o report.json
+```
+
+Serial number and MAC are scrubbed unless `--include-identifiers` is given.
+`--capture` writes scrubbed packet captures in the
+[tests/fixtures/captures](tests/fixtures/captures/README.md) format; review
+them before committing.
 
 ## Parity table
 
@@ -75,7 +102,7 @@ ZK_HOST=192.168.1.201 ZK_PORT=4370 ZK_PASSWORD=0 \
     cargo test -p zkteco-client --features hardware --test hardware -- --nocapture
 ```
 
-Set `ZK_TRANSPORT=udp` to run the same suite over UDP.
+`ZK_TRANSPORT` is `tcp` (default), `udp` or `auto`.
 
 Tests that change device data (a temporary user, a copied template deleted
 by user ID, setting the clock to its current value) run only with

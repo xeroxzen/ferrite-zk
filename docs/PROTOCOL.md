@@ -192,8 +192,15 @@ The table is a `u32` byte length followed by the records.
   packets carrying `size` bytes in total, then `CMD_ACK_OK`.
   - On TCP, each `CMD_DATA` carries its 0-based sequence number in the
     session ID field (3.2) [observed].
-  - On UDP, packets carry up to 1024 payload bytes [ref]. Sequence numbers are
-    unknown, so loss is detected only by comparing the total against `size`.
+  - On UDP, packets carry up to 1024 payload bytes [ref]; the manual caps
+    each streamed packet at 1 KiB [manual]. Whether UDP `Data` packets carry
+    a sequence number is unknown: the manual does not describe the header
+    of streamed packets, pyzk reads only the command code, and no source has
+    a UDP `Data` packet (D25). Loss is detected only by comparing the total
+    against `size`, and reordering not at all, unless each request yields a
+    single `Data` packet.
+  - The manual defines no checksum command for buffers [manual]; only the
+    per-packet header checksum exists.
 
 The reference implementation does not compare the received total against
 `size`, so a short UDP stream counts as success. That is a data-loss risk (D10).

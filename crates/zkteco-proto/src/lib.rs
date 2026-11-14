@@ -7,6 +7,7 @@ pub mod framing;
 pub mod packet;
 pub mod records;
 pub mod requests;
+pub mod scrub;
 pub mod session;
 mod text;
 pub mod time;

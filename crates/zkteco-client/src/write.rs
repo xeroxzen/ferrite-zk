@@ -1,11 +1,11 @@
 //! Operations that change users and templates. All are destructive.
 
 use zkteco_proto::records::finger::{self, Template};
-use zkteco_proto::records::options::keys;
 use zkteco_proto::records::user::{self, User, UserFormat};
 use zkteco_proto::{requests, Command, RecordKind, Transport, Uid, UserId};
 
 use crate::client::{failure, Client};
+use crate::compat;
 use crate::error::{Error, Result};
 
 impl Client {
@@ -77,7 +77,7 @@ impl Client {
     /// replies; timeout or connection errors.
     #[doc = "Unverified against hardware."]
     pub async fn delete_user_template_by_user_id(&mut self, user_id: &UserId, fid: u8) -> Result<bool> {
-        if self.config.transport == Transport::Udp {
+        if self.transport() == Transport::Udp {
             let uid = self.resolve_uid(user_id).await?;
             return self.delete_user_template(uid, fid).await;
         }
@@ -114,13 +114,14 @@ impl Client {
         self.refresh_data().await
     }
 
-    /// The user layout for writes: configured, detected earlier, or detected
-    /// now from the user table.
+    /// The user layout for writes: configured, detected earlier, detected
+    /// now from the user table, or looked up in the compatibility table
+    /// (`docs/COMPATIBILITY.md`, D27) from the device's firmware, platform
+    /// and format options.
     ///
     /// No option or firmware value is documented to identify the layout
-    /// (PROTOCOL.md 9.1; D23), so with no users and no configuration this
-    /// fails, reporting the firmware and format options to help the caller
-    /// choose.
+    /// (PROTOCOL.md 9.1; D23), so only verified hardware reports can
+    /// answer; otherwise this fails, reporting the device's values.
     async fn user_format_for_write(&mut self) -> Result<UserFormat> {
         if let Some(f) = self.config.user_format.or(self.detected_user_format) {
             return Ok(f);
@@ -129,36 +130,19 @@ impl Client {
         if let Some(f) = self.detected_user_format {
             return Ok(f);
         }
-        let evidence = self.format_evidence().await?;
+        let facts = self.device_facts().await?;
+        if let Some(f) = compat::user_format_for(compat::COMPATIBILITY, &facts) {
+            tracing::info!(?facts, ?f, "user layout from the compatibility table");
+            return Ok(f);
+        }
         Err(Error::UnsupportedRecordFormat {
             kind: RecordKind::User,
             detail: format!(
                 "cannot determine the user record layout: the device has no users to measure, and no \
-                 documented option or firmware value identifies it ({evidence}). \
-                 Set ClientConfig::user_format"
+                 verified row in docs/COMPATIBILITY.md matches it (model {:?}, firmware {:?}, platform \
+                 {:?}, ~UserExtFmt={:?}, ~ExtendFmt={:?}). Set ClientConfig::user_format",
+                facts.model, facts.firmware, facts.platform, facts.user_ext_fmt, facts.extend_fmt
             ),
         })
-    }
-
-    /// Firmware version and format-related options, as text for an error
-    /// message. Values the device refuses are shown as "unavailable".
-    async fn format_evidence(&mut self) -> Result<String> {
-        let mut parts = Vec::with_capacity(3);
-        let firmware = self.firmware_version().await;
-        parts.push(format!("firmware {}", shown(firmware)?));
-        for key in [keys::USER_EXT_FMT, keys::EXTEND_FMT] {
-            let value = self.option(key).await;
-            parts.push(format!("{key}={}", shown(value)?));
-        }
-        Ok(parts.join(", "))
-    }
-}
-
-/// A queried value for display; fatal errors propagate.
-fn shown(value: Result<String>) -> Result<String> {
-    match value {
-        Ok(v) => Ok(format!("{v:?}")),
-        Err(e) if e.is_fatal() => Err(e),
-        Err(_) => Ok("unavailable".into()),
     }
 }

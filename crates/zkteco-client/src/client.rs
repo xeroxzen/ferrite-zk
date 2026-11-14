@@ -6,11 +6,12 @@ use zkteco_proto::packet::{self, Packet};
 use zkteco_proto::records::event::{self, LiveEvent};
 use zkteco_proto::records::user::UserFormat;
 use zkteco_proto::session::Session;
-use zkteco_proto::{Command, ProtoError, Transport};
+use zkteco_proto::{Command, ProtoError};
 
-use crate::config::{ClientConfig, ReplyIdPolicy};
+use crate::config::{ClientConfig, ReplyIdPolicy, Transport, READ_ONLY_COMMANDS};
 use crate::error::{Error, Result};
 use crate::link::{Link, TcpLink};
+use crate::record::{Direction, Recording};
 
 /// Packets (events, mismatched replies) accepted at most while waiting for
 /// one reply.
@@ -35,7 +36,19 @@ pub struct Client {
     /// Live events received while waiting for replies.
     pending: VecDeque<LiveEvent>,
     dropped_events: u64,
+    discarded_replies: u64,
+    recording: Option<Recording>,
+    /// The transport of the current or last connection.
+    wire: zkteco_proto::Transport,
+    /// Chunk size for single-datagram UDP reads; shrinks if the device
+    /// splits replies into smaller packets.
+    pub(crate) udp_chunk: u32,
 }
+
+/// The first single-datagram chunk size over UDP: the per-packet size seen
+/// in `PrepareData` replies (PROTOCOL.md 7.2), under the manual's 1 KiB
+/// limit.
+pub(crate) const UDP_SINGLE_DATAGRAM: u32 = 1008;
 
 impl Client {
     /// Connect and authenticate.
@@ -70,7 +83,28 @@ impl Client {
     }
 
     async fn connect_once(config: ClientConfig) -> Result<Self> {
-        let link = Link::connect(&config).await?;
+        use zkteco_proto::Transport as Wire;
+        match config.transport {
+            Transport::Tcp => Self::connect_over(config, Wire::Tcp).await,
+            Transport::Udp => Self::connect_over(config, Wire::Udp).await,
+            Transport::Auto => match Self::connect_over(config.clone(), Wire::Tcp).await {
+                Ok(client) => {
+                    tracing::info!(host = %config.host, "connected over TCP (auto)");
+                    Ok(client)
+                }
+                Err(e) if falls_back(&e) => {
+                    tracing::info!(host = %config.host, %e, "TCP failed; trying UDP (auto)");
+                    let client = Self::connect_over(config, Wire::Udp).await?;
+                    tracing::info!(host = %client.config.host, "connected over UDP (auto)");
+                    Ok(client)
+                }
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    async fn connect_over(config: ClientConfig, wire: zkteco_proto::Transport) -> Result<Self> {
+        let link = Link::connect(&config, wire).await?;
         let mut client = Self {
             config,
             link: Some(link),
@@ -78,6 +112,10 @@ impl Client {
             detected_user_format: None,
             pending: VecDeque::new(),
             dropped_events: 0,
+            discarded_replies: 0,
+            recording: None,
+            wire,
+            udp_chunk: UDP_SINGLE_DATAGRAM,
         };
         client.handshake().await?;
         Ok(client)
@@ -133,10 +171,13 @@ impl Client {
         self.close().await;
         let fresh = Self::connect(self.config.clone()).await?;
         let pending = std::mem::take(&mut self.pending);
-        let dropped = self.dropped_events;
+        let recording = self.recording.take();
+        let (dropped, discarded) = (self.dropped_events, self.discarded_replies);
         *self = fresh;
         self.pending = pending;
+        self.recording = recording;
         self.dropped_events = dropped;
+        self.discarded_replies = discarded;
         Ok(())
     }
 
@@ -151,6 +192,33 @@ impl Client {
     #[must_use]
     pub fn session_id(&self) -> u16 {
         self.session.session_id()
+    }
+
+    /// The transport of the current connection (or the last one, once
+    /// closed). With [`Transport::Auto`] this is the one that worked.
+    #[must_use]
+    pub fn transport(&self) -> zkteco_proto::Transport {
+        self.wire
+    }
+
+    /// Replies discarded under [`ReplyIdPolicy::Strict`] because their reply
+    /// ID did not match the request, since the client was created.
+    #[must_use]
+    pub fn discarded_replies(&self) -> u64 {
+        self.discarded_replies
+    }
+
+    /// Record every packet sent and received from now on, until
+    /// [`take_recording`](Self::take_recording). Restarts a recording in
+    /// progress.
+    pub fn start_recording(&mut self) {
+        self.recording = Some(Recording::default());
+    }
+
+    /// Stop recording and return what was recorded (empty if recording was
+    /// not started).
+    pub fn take_recording(&mut self) -> Recording {
+        self.recording.take().unwrap_or_default()
     }
 
     /// The configuration in use.
@@ -189,8 +257,20 @@ impl Client {
         Ok(reply_id)
     }
 
+    /// Send one packet. Every outgoing packet passes here, so this is where
+    /// read-only mode is enforced.
     async fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.config.read_only {
+            let command = Command::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+            if !READ_ONLY_COMMANDS.contains(&command) {
+                tracing::warn!(?command, "refused: read-only client");
+                return Err(Error::ReadOnly(command));
+            }
+        }
         let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
+        if let Some(rec) = &mut self.recording {
+            rec.push(Direction::HostToDevice, bytes);
+        }
         if let Err(e) = link.send(bytes).await {
             self.close().await;
             return Err(e);
@@ -248,6 +328,7 @@ impl Client {
                 );
                 return Ok(Some(packet));
             }
+            self.discarded_replies += 1;
             tracing::warn!(
                 ?command,
                 expected = reply_id,
@@ -267,7 +348,12 @@ impl Client {
     pub(crate) async fn recv_by(&mut self, deadline: Instant) -> Result<Option<Packet>> {
         let link = self.link.as_mut().ok_or(Error::ConnectionClosed)?;
         match tokio::time::timeout_at(deadline, link.recv()).await {
-            Ok(Ok(raw)) => Ok(Some(packet::decode(raw, self.config.checksum_policy)?)),
+            Ok(Ok(raw)) => {
+                if let Some(rec) = &mut self.recording {
+                    rec.push(Direction::DeviceToHost, &raw);
+                }
+                Ok(Some(packet::decode(raw, self.config.checksum_policy)?))
+            }
             Ok(Err(e)) => {
                 self.close().await;
                 Err(e)
@@ -323,24 +409,51 @@ pub(crate) fn failure(command: Command, reply: Command) -> Error {
     }
 }
 
+/// Whether a failed TCP attempt under [`Transport::Auto`] should fall back
+/// to UDP: the device could not be reached or did not answer. A refusal
+/// (wrong password, failure reply) is an answer, so it does not.
+fn falls_back(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Io(_) | Error::Timeout { .. } | Error::ConnectionClosed | Error::Malformed(_)
+    )
+}
+
 /// Check that the device is reachable. This replaces pyzk's ping and TCP
 /// test; there is no ICMP.
 ///
 /// Over TCP: a TCP connect, without starting a session. Over UDP, which has
 /// no connection: `CMD_CONNECT` (and `CMD_AUTH` if asked) answered within the
-/// request timeout, then `CMD_EXIT`.
+/// request timeout, then `CMD_EXIT`. With [`Transport::Auto`]: TCP, then UDP
+/// if TCP fails.
 ///
 /// # Errors
 ///
 /// [`Error::Timeout`] or [`Error::Io`] if the device does not answer; over
 /// UDP also the errors of [`Client::connect`].
 pub async fn probe(config: &ClientConfig) -> Result<()> {
+    let tcp = || TcpLink::connect(&config.host, config.port, config.connect_timeout);
+    let udp = || async {
+        Client::connect_over(config.clone(), zkteco_proto::Transport::Udp)
+            .await?
+            .disconnect()
+            .await
+    };
     match config.transport {
         Transport::Tcp => {
-            let link = TcpLink::connect(&config.host, config.port, config.connect_timeout).await?;
-            link.shutdown().await;
+            tcp().await?.shutdown().await;
             Ok(())
         }
-        Transport::Udp => Client::connect_once(config.clone()).await?.disconnect().await,
+        Transport::Udp => udp().await,
+        Transport::Auto => match tcp().await {
+            Ok(link) => {
+                link.shutdown().await;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::info!(%e, "TCP probe failed; trying UDP (auto)");
+                udp().await
+            }
+        },
     }
 }

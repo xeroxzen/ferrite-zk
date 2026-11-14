@@ -63,6 +63,11 @@ pub struct Faults {
     /// Send the `Data` packet with this index twice in the next stream (a
     /// duplicated datagram).
     pub duplicate_data_packet_once: Option<usize>,
+    /// Swap the packets at this index and the next, counting from the first
+    /// after `PrepareData`, in the next stream (datagrams reordered in
+    /// transit). `Some(0)` with a single `Data` packet swaps it with the
+    /// closing `AckOk`.
+    pub reorder_stream_once: Option<usize>,
 }
 
 impl Default for Faults {
@@ -83,6 +88,7 @@ impl Default for Faults {
             lose_data_packet_once: None,
             lose_stream_tail_once: false,
             duplicate_data_packet_once: None,
+            reorder_stream_once: None,
         }
     }
 }
@@ -386,6 +392,11 @@ impl DeviceState {
             return out;
         }
         out.push((Command::AckOk, self.session_id, Vec::new()));
+        if let Some(i) = self.faults.reorder_stream_once.take() {
+            if i + 2 < out.len() {
+                out.swap(i + 1, i + 2);
+            }
+        }
         out
     }
 

@@ -30,9 +30,9 @@ pub(crate) enum Link {
 }
 
 impl Link {
-    pub(crate) async fn connect(config: &ClientConfig) -> Result<Self> {
+    pub(crate) async fn connect(config: &ClientConfig, transport: Transport) -> Result<Self> {
         let (host, port, timeout) = (config.host.as_str(), config.port, config.connect_timeout);
-        Ok(match config.transport {
+        Ok(match transport {
             Transport::Tcp => Self::Tcp(TcpLink::connect(host, port, timeout).await?),
             Transport::Udp => Self::Udp(UdpLink::connect(host, port, timeout).await?),
         })

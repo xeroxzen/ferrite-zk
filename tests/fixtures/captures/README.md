@@ -26,6 +26,12 @@ capture is committed:
 4. Prefer a test device enrolled with synthetic users over scrubbing a
    production capture.
 
+`zkctl diagnose --capture DIR` applies rules 2 and 3 automatically, never
+reads templates, zeroes the `CMD_AUTH` payload (the comm key reveals the
+password), zeroes `Data` payloads it cannot attribute to a table, and leaves
+live events out (DECISIONS.md D28). Review its output before committing all
+the same.
+
 Scrubbing must keep lengths unchanged so the capture still exercises the
 same record layouts.
 

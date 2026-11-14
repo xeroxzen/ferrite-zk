@@ -13,11 +13,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use zkteco_client::{ClientConfig, RetryPolicy};
+use zkteco_client::{ClientConfig, RetryPolicy, Transport};
 use zkteco_proto::framing::{encode_tcp, TcpFrameDecoder};
 use zkteco_proto::packet::{self, Packet};
-use zkteco_proto::{ChecksumPolicy, Command, Transport};
+use zkteco_proto::{ChecksumPolicy, Command};
 
+#[allow(unused_imports, reason = "each test file uses a different subset")]
 pub use device::{punches, templates, users, Delivery, DeviceState, Faults};
 
 /// A running mock device. Dropping it stops the server.
@@ -36,9 +37,23 @@ impl Drop for MockDevice {
     }
 }
 
+/// A TCP listener and a UDP socket on the same port number, as on a real
+/// device, so `Transport::Auto` can fall back. The UDP port may already be
+/// taken (another test's client socket), so try a few fresh ports.
+async fn bind_pair() -> (TcpListener, UdpSocket) {
+    for _ in 0..64 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        if let Ok(udp) = UdpSocket::bind(addr).await {
+            return (listener, udp);
+        }
+    }
+    panic!("no port free for both TCP and UDP");
+}
+
 impl MockDevice {
     pub async fn start(state: DeviceState) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let (listener, udp) = bind_pair().await;
         let addr = listener.local_addr().expect("local addr");
         let state = Arc::new(Mutex::new(state));
         let shared = Arc::clone(&state);
@@ -52,7 +67,6 @@ impl MockDevice {
                 tokio::spawn(serve(stream, Arc::clone(&shared)));
             }
         });
-        let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind udp");
         let udp_addr = udp.local_addr().expect("udp local addr");
         let udp_server = tokio::spawn(serve_udp(udp, Arc::clone(&state)));
         Self {
@@ -60,6 +74,22 @@ impl MockDevice {
             udp_addr,
             state,
             server,
+            udp_server,
+        }
+    }
+
+    /// A device that answers only over UDP: nothing listens on its TCP
+    /// port.
+    pub async fn start_udp_only(state: DeviceState) -> Self {
+        let state = Arc::new(Mutex::new(state));
+        let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind udp");
+        let udp_addr = udp.local_addr().expect("udp local addr");
+        let udp_server = tokio::spawn(serve_udp(udp, Arc::clone(&state)));
+        Self {
+            addr: udp_addr,
+            udp_addr,
+            state,
+            server: tokio::spawn(async {}),
             udp_server,
         }
     }
@@ -73,6 +103,7 @@ impl MockDevice {
     pub fn config(&self) -> ClientConfig {
         ClientConfig::new(self.addr.ip().to_string())
             .port(self.addr.port())
+            .transport(Transport::Tcp)
             .connect_timeout(Duration::from_secs(2))
             .request_timeout(Duration::from_millis(500))
             .retry(RetryPolicy {

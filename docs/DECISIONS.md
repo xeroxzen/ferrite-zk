@@ -136,7 +136,8 @@ is ever dropped.
 `ChunkReceiver` checks the announced size against the requested size, TCP
 sequence numbers, short streams (`ShortRead`) and overruns. pyzk returns
 partial UDP data as success. The client surfaces it as
-`Error::ShortRead { expected, got }` on both transports (D25). Orchestration (staging,
+`Error::ShortRead { expected, got }` on both transports. Over UDP, reads
+default to single-datagram chunks (D25). Orchestration (staging,
 chunk loop, retries, `FreeData`) lives in the client. `zkteco-proto`
 provides the plan (`chunk_plan`), the reply state machine and the payload
 codecs.
@@ -281,8 +282,9 @@ in CI and from an opt-in pre-commit hook (`.githooks/pre-commit`). Details in
   So detection is inconclusive and the write fails with
   `UnsupportedRecordFormat`. The message includes the firmware version and
   the `~UserExtFmt` and `~ExtendFmt` values and tells the caller to set
-  `user_format`. When hardware captures tie one of these values to a layout,
-  the rule goes in `write.rs::user_format_for_write`.
+  `user_format`. Since the phase 4 review, the client first looks the
+  device up in `docs/COMPATIBILITY.md` (D27); new hardware evidence goes in
+  that table, not in code.
 - **Attendance.** `attendance()` returns records as stored. The explicit
   `attendance_with_users()` reads the user table at most once (only if some
   record lacks a user ID) and returns `Batch<ResolvedAttendance>`; each record
@@ -318,24 +320,47 @@ dereferences to `str` and compares with `&str` for convenience.
 `requests::start_enroll_udp` now takes a `&UserId` and fails if it is not
 numeric.
 
-## D25. UDP transport (phase 4)
+## D25. UDP transport (revised after phase 4 review)
 
 - **Framing.** One packet per datagram, no prefix. The socket is connected
   to the device address, so the OS drops datagrams from anywhere else.
   Each receive uses a 64 KiB buffer, the largest possible datagram, so
   nothing is truncated (pitfall 2).
-- **Chunks** are 16 KiB (`ReadBuffer` requests), against 0xFFC0 over TCP,
-  as pyzk. Within a chunk the device streams `Data` packets of its own size.
-- **Loss and duplication** are detected by size only. UDP `Data` packets
-  carry no known sequence number, so `ChunkReceiver` counts bytes: a missing
-  packet shows up as a short stream when the closing `AckOk` arrives, a
-  duplicate as an overrun. Both are retried like any corrupt chunk (D22).
-- **Reordering is undetectable.** Two packets swapped in transit give the
-  right byte count with the bytes in the wrong order, and the chunk is
-  accepted. The record decoders may reject the damaged records, or may not
-  (a swapped attendance block decodes as different, plausible records).
-  This is a known risk of UDP; prefer TCP where the device supports it. On
-  a single LAN segment reordering is rare.
+- **Reordering, investigated.** Over TCP, streamed `Data` packets carry a
+  sequence number in the session ID field (PROTOCOL.md 3.2). For UDP:
+  - (a) *Do the session ID or reply ID vary across UDP `Data` packets?*
+    **Unknown; no source shows a UDP `Data` packet.** The 2006 manual does
+    not describe the header of streamed packets. pyzk's UDP path reads only
+    the command code. Every streamed `Data` packet in pyzk's test fixtures
+    is a TCP frame. The other Rust ports copy pyzk. Nothing is implemented
+    on a guess; `zkctl diagnose` measures it (`udp_stream_headers` in its
+    report, from a 16 KiB UDP read). If hardware shows a sequence,
+    `ChunkReceiver` checks it as on TCP.
+  - (b) *Does the 2006 manual define a buffer checksum command?* **No.** Its
+    command table (`pyzk/docs/_static/Communication_protocol_manual_CMD.pdf`)
+    has no checksum or CRC command for buffers, and `CMD_PREPARE_BUFFER` /
+    `CMD_READ_BUFFER` (1503/1504) are not in it at all. The only checksum
+    is the per-packet header checksum, which a reordering does not affect.
+    The manual does say each streamed packet is at most 1 KiB.
+- **Default: single-datagram chunks** (`UdpChunking::SingleDatagram`).
+  `ReadBuffer` requests ask for at most 1008 bytes, the per-packet size
+  seen in `PrepareData` replies and under the manual's 1 KiB limit, so each
+  reply holds one `Data` packet and there is nothing to reorder. What can
+  still be reordered is detected: an `AckOk` ahead of its `Data` is a short
+  read (retried), and a `Data` ahead of its `PrepareData` is the whole
+  chunk, accepted (the bytes are the same). If the device splits a reply
+  into several `Data` packets anyway, the chunk is discarded (its order
+  cannot be trusted), the chunk size shrinks to the first packet's length
+  (not below 64 bytes), and the chunk is read again. Cost: one round trip
+  per KiB, so 100 000 40-byte attendance records (4 MB) take about 4 000
+  requests.
+- **Opt-in: 16 KiB chunks** (`UdpChunking::Large`, as pyzk). Documented as
+  unsafe against reordering: two `Data` datagrams swapped in transit give a
+  chunk of the right length with its bytes in the wrong order, and it is
+  accepted. A mock test (`large_chunks_accept_reordered_datagrams_silently`)
+  shows the read succeeding with wrong records.
+- **Loss and duplication** are detected by size in both modes and retried
+  like any corrupt chunk (D22).
 - **A stalled stream** (the tail of a chunk lost, so no `AckOk` arrives)
   is the one timeout that does not close the connection: under
   `ReplyIdPolicy::Strict`, once the stream has started, the client returns
@@ -344,8 +369,65 @@ numeric.
   packet from the abandoned stream carries the old reply ID and is
   discarded. Under Lenient that guarantee is gone, so a stall is a fatal
   `Timeout`, as on TCP. A stall before the stream starts is also a `Timeout`.
-- **`probe`** over UDP sends `Connect` and, if answered, `Exit`. There is
-  no UDP equivalent of a bare TCP connect.
+- **`probe`** over UDP sends `Connect` and, if answered, `Exit`.
 - **Template delete by user ID** over UDP resolves the `uid` from the user
   table and sends `DeleteUserTemp` (as pyzk); command 134 is TCP only (D15).
-- **Hardware tests** run over UDP with `ZK_TRANSPORT=udp`.
+
+## D26. Transport selection
+
+`zkteco_client::Transport` is `Auto` (default), `Tcp` or `Udp`. It is the
+client's own enum; `zkteco_proto::Transport` stays `Tcp | Udp`, because the
+protocol layer needs the concrete transport, and `Client::transport()`
+returns that. `Auto` tries TCP and falls back to UDP when the TCP attempt
+gets no answer: I/O error, timeout, closed connection or a malformed reply.
+A refusal (wrong password, failure reply) is an answer, so it does not fall
+back. The choice is logged at `info`. Each connect (including `reconnect`)
+chooses again, so a device that recovers its TCP port is used over TCP. The
+worst case is one TCP connect timeout plus the UDP attempt.
+
+## D27. Compatibility table
+
+`docs/COMPATIBILITY.md` records layouts and behaviour per device, one row
+per `zkctl diagnose` report checked by a maintainer.
+`zkteco_client::compat::COMPATIBILITY` holds the same rows, and a unit test
+compares the two, so adding a row means editing both and nothing else.
+`user_format_for_write` (D23) consults it when the device has no users to
+measure: a row applies if every identifying column (model, firmware,
+platform, `~UserExtFmt`, `~ExtendFmt`) equals the device's value or is `*`;
+rows without "verified by" are ignored; applicable rows that disagree make
+the result inconclusive. The table starts empty: there are no hardware
+reports yet, and rows are never taken from documentation or pyzk's device
+list.
+
+## D28. Read-only mode and `zkctl diagnose`
+
+- `ClientConfig::read_only` makes the client refuse any packet whose
+  command is not in `READ_ONLY_COMMANDS`, checked in `send_raw`, which every
+  outgoing packet passes through. The refusal is `Error::ReadOnly(command)`;
+  nothing is sent and the session stays usable. The allowlist is session
+  control, reads, buffer staging and release (`PrepareBuffer`, `ReadBuffer`,
+  `FreeData`) and `AckOk` for live-event acknowledgements. Unit tests pin
+  the list exactly and check it against every write, clear, delete, enrol,
+  device-state, upload and power command and every unnamed code.
+- `zkctl diagnose` (brought forward from phase 6) uses only read-only
+  clients. It reads the device facts and counters, then reads the user and
+  attendance tables three times (TCP 64 KiB, UDP single-datagram, UDP
+  16 KiB), each first under Strict reply IDs and, if that times out, under
+  Lenient. It reports one `docs/COMPATIBILITY.md` row plus the measurements
+  behind it, whether the UDP tables equal the TCP ones, and the header
+  fields of streamed UDP packets (D25 a). It never reads templates.
+- Serial number and MAC are replaced by `scrubbed` unless
+  `--include-identifiers`. The report holds counts, sizes and layout names,
+  never records.
+- `--capture DIR` writes one capture per probe in the
+  `tests/fixtures/captures` format. Captures are always scrubbed (the flag
+  above affects only the report): table data is reassembled by request
+  offset and scrubbed with `zkteco_proto::scrub` (synthetic user IDs that
+  still join across tables, synthetic names and timestamps, cleared
+  passwords and cards, unknown regions zeroed); identifying options are
+  scrubbed; the `CMD_AUTH` payload is zeroed, because the comm key can be
+  reversed into the password; unattributable `Data` payloads are zeroed;
+  live events are left out. Lengths are kept and checksums recomputed, so
+  the captures pass `zkteco-proto`'s replay test.
+- The password can come from `ZK_PASSWORD`, which keeps it out of shell
+  history.

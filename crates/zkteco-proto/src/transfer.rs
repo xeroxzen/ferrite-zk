@@ -118,6 +118,8 @@ pub struct ChunkReceiver {
     check_sequence: bool,
     state: State,
     data: BytesMut,
+    data_packets: usize,
+    first_data_len: Option<usize>,
 }
 
 impl ChunkReceiver {
@@ -133,6 +135,8 @@ impl ChunkReceiver {
             check_sequence: transport == Transport::Tcp,
             state: State::AwaitingReply,
             data: BytesMut::new(),
+            data_packets: 0,
+            first_data_len: None,
         }
     }
 
@@ -144,6 +148,19 @@ impl ChunkReceiver {
             State::Streaming { size, .. } => Some(size),
             _ => None,
         }
+    }
+
+    /// `Data` packets accepted so far, including an inline reply.
+    #[must_use]
+    pub fn data_packets(&self) -> usize {
+        self.data_packets
+    }
+
+    /// Payload length of the first `Data` packet, once one has arrived. In a
+    /// stream of several packets this is the device's packet size.
+    #[must_use]
+    pub fn first_data_len(&self) -> Option<usize> {
+        self.first_data_len
     }
 
     /// Bytes collected so far.
@@ -166,6 +183,7 @@ impl ChunkReceiver {
         match (self.state, cmd) {
             (State::AwaitingReply, Command::Data) => {
                 self.check_size(packet.payload.len())?;
+                self.count_data(packet.payload.len());
                 self.state = State::Done;
                 Ok(Progress::Complete(packet.payload.clone()))
             }
@@ -185,6 +203,7 @@ impl ChunkReceiver {
                     });
                 }
                 self.data.extend_from_slice(&packet.payload);
+                self.count_data(packet.payload.len());
                 if self.data.len() > size {
                     return Err(ProtoError::Overrun {
                         expected: size,
@@ -220,6 +239,11 @@ impl ChunkReceiver {
                 context: "after the chunk completed",
             }),
         }
+    }
+
+    fn count_data(&mut self, len: usize) {
+        self.data_packets += 1;
+        self.first_data_len.get_or_insert(len);
     }
 
     fn check_size(&self, size: usize) -> Result<()> {
@@ -301,6 +325,7 @@ mod tests {
             Progress::Complete(Bytes::from_static(b"abcde"))
         );
         assert_eq!(r.streaming_size(), None);
+        assert_eq!((r.data_packets(), r.first_data_len()), (2, Some(3)));
     }
 
     #[test]

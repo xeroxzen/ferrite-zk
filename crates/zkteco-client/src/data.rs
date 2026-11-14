@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
+
 use zkteco_proto::command::table;
 use zkteco_proto::records::attendance::{self, Attendance, AttendanceBatch, AttendanceFormat};
 use zkteco_proto::records::finger::{self, Template};
@@ -32,6 +34,17 @@ pub enum UserIdSource {
     /// Not resolved: the record has no user ID and its `uid` is missing or
     /// matches no decoded user. `record.user_id` is `None`.
     Unresolved,
+}
+
+/// A table that can be read raw with [`Client::raw_table`]. Templates are
+/// deliberately not offered: raw images bypass every decoding safeguard,
+/// and template images are biometric data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawTable {
+    /// The user table.
+    Users,
+    /// The attendance log.
+    Attendance,
 }
 
 /// The byte length a table announces in its `u32` prefix.
@@ -69,7 +82,7 @@ impl Client {
         if users == 0 {
             return Ok(Batch::default());
         }
-        let data = self.read_buffered(Command::UserTempRrq, table::USERS, 0).await?;
+        let data = self.raw_table(RawTable::Users).await?;
         let announced = announced_len(&data)?;
         if announced == 0 {
             tracing::warn!(users, "device reported users but sent an empty table");
@@ -100,7 +113,7 @@ impl Client {
         if records == 0 {
             return Ok(Batch::default());
         }
-        let data = self.read_buffered(Command::AttLogRrq, 0, 0).await?;
+        let data = self.raw_table(RawTable::Attendance).await?;
         let announced = announced_len(&data)?;
         if announced == 0 {
             tracing::warn!(records, "device reported records but sent an empty table");
@@ -111,6 +124,20 @@ impl Client {
             None => AttendanceFormat::detect(announced, records)?,
         };
         Ok(attendance::decode_table_as(&data, format, self.config.encoding)?)
+    }
+
+    /// A table image as the device sends it: a `u32` byte length, then the
+    /// records, undecoded. For diagnostics; [`users`](Self::users) and
+    /// [`attendance`](Self::attendance) decode it.
+    ///
+    /// # Errors
+    ///
+    /// Device, timeout or transfer errors.
+    pub async fn raw_table(&mut self, which: RawTable) -> Result<Bytes> {
+        match which {
+            RawTable::Users => self.read_buffered(Command::UserTempRrq, table::USERS, 0).await,
+            RawTable::Attendance => self.read_buffered(Command::AttLogRrq, 0, 0).await,
+        }
     }
 
     /// All fingerprint templates.
@@ -187,7 +214,10 @@ impl Client {
             let reply_id = self
                 .send(Command::GetUserTemp, &requests::template_by_uid(uid, fid))
                 .await?;
-            match self.receive_data(Command::GetUserTemp, reply_id, None).await {
+            match self
+                .receive_data(Command::GetUserTemp, reply_id, None, false)
+                .await
+            {
                 Ok(data) => {
                     let data = finger::clean_single(&data)?;
                     return Ok(Some(Template {

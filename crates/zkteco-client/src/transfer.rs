@@ -8,7 +8,7 @@ use zkteco_proto::transfer::{self, ChunkReceiver, Progress};
 use zkteco_proto::{requests, Command, ProtoError, Transport};
 
 use crate::client::{failure, Client};
-use crate::config::ReplyIdPolicy;
+use crate::config::{ReplyIdPolicy, UdpChunking};
 use crate::error::{Error, Result};
 
 /// How long the line must stay quiet before a failed stream counts as
@@ -21,6 +21,9 @@ const MAX_DRAIN_PACKETS: usize = 1024;
 
 /// Packets accepted at most for a reply of unknown size.
 const MAX_UNSIZED_PACKETS: usize = 1 << 16;
+
+/// The single-datagram chunk size never shrinks below this.
+const MIN_UDP_CHUNK: u32 = 64;
 
 /// Upper bound on the initial buffer reservation, whatever size the device
 /// announces.
@@ -48,21 +51,51 @@ impl Client {
         Ok(data)
     }
 
+    /// Read `size` bytes in chunks. The chunk size can shrink between
+    /// chunks (single-datagram UDP), so the plan is computed as it goes.
     async fn read_chunks(&mut self, size: u32) -> Result<Bytes> {
         let reserve = usize::try_from(size).map_or(MAX_RESERVE, |s| s.min(MAX_RESERVE));
         let mut out = BytesMut::with_capacity(reserve);
-        for (start, len) in transfer::chunk_plan(size, self.config.transport) {
-            let chunk = self.read_chunk(start, len).await?;
+        let mut start = 0u32;
+        // Every pass advances by at least MIN_UDP_CHUNK bytes or the rest.
+        let max_passes = size.div_ceil(MIN_UDP_CHUNK);
+        for _ in 0..max_passes {
+            if start >= size {
+                break;
+            }
+            let chunk = self.read_chunk(start, size - start).await?;
+            let len = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+            assert!(
+                len > 0 && len <= size - start,
+                "chunk length checked by ChunkReceiver"
+            );
             out.extend_from_slice(&chunk);
+            start += len;
         }
+        assert_eq!(start, size, "each pass advances by a whole chunk");
         Ok(out.freeze())
     }
 
-    /// Read one chunk, retrying malformed replies per the retry policy.
-    async fn read_chunk(&mut self, start: u32, len: u32) -> Result<Bytes> {
+    /// The largest chunk to request now.
+    fn chunk_len(&self) -> u32 {
+        match (self.transport(), self.config.udp_chunking) {
+            (Transport::Udp, UdpChunking::SingleDatagram) => self.udp_chunk,
+            (wire, _) => wire.max_read_chunk(),
+        }
+    }
+
+    fn single_datagram(&self) -> bool {
+        self.transport() == Transport::Udp && self.config.udp_chunking == UdpChunking::SingleDatagram
+    }
+
+    /// Read one chunk at `start`, at most `remaining` bytes long, retrying
+    /// malformed replies per the retry policy. The chunk size is taken
+    /// afresh on each attempt, so a retry after a shrink uses the new size.
+    async fn read_chunk(&mut self, start: u32, remaining: u32) -> Result<Bytes> {
         let attempts = self.config.retry.attempts();
         let mut attempt = 1;
         loop {
+            let len = self.chunk_len().min(remaining);
             match self.read_chunk_once(start, len).await {
                 Ok(data) => return Ok(data),
                 Err(e) if retryable(&e) && attempt < attempts => {
@@ -81,8 +114,31 @@ impl Client {
         let reply_id = self
             .send(Command::ReadBuffer, &requests::read_buffer(start, len))
             .await?;
-        self.receive_data(Command::ReadBuffer, reply_id, Some(requested))
+        let single = self.single_datagram();
+        self.receive_data(Command::ReadBuffer, reply_id, Some(requested), single)
             .await
+    }
+
+    /// In single-datagram mode, a reply that came in several `Data` packets
+    /// may have been reordered, so it is rejected. The chunk size shrinks to
+    /// the device's packet size for the retry.
+    fn reject_split(&mut self, rx: &ChunkReceiver) -> Error {
+        let packet = rx
+            .first_data_len()
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(MIN_UDP_CHUNK);
+        let shrunk = packet.clamp(MIN_UDP_CHUNK, self.udp_chunk);
+        tracing::warn!(
+            packets = rx.data_packets(),
+            from = self.udp_chunk,
+            to = shrunk,
+            "device split a single-datagram chunk; shrinking the chunk size"
+        );
+        self.udp_chunk = shrunk;
+        Error::Malformed(ProtoError::UnexpectedReply {
+            got: Command::Data,
+            context: "several data packets in single-datagram mode",
+        })
     }
 
     /// Collect the data reply to the request with `reply_id`: inline `Data`,
@@ -91,14 +147,16 @@ impl Client {
     ///
     /// The loop is bounded by a packet count derived from the requested
     /// size; the total may not exceed the announced size, and on TCP each
-    /// `Data` packet must carry the next sequence number.
+    /// `Data` packet must carry the next sequence number. With
+    /// `single_packet`, a reply in more than one `Data` packet is an error.
     pub(crate) async fn receive_data(
         &mut self,
         command: Command,
         reply_id: u16,
         requested: Option<usize>,
+        single_packet: bool,
     ) -> Result<Bytes> {
-        let mut rx = ChunkReceiver::new(requested, self.config.transport);
+        let mut rx = ChunkReceiver::new(requested, self.transport());
         let limit = requested.map_or(MAX_UNSIZED_PACKETS, |r| r.saturating_add(3));
         for _ in 0..limit {
             let Some(packet) = self.wait_reply(command, reply_id).await? else {
@@ -109,6 +167,9 @@ impl Client {
                 return Err(failure(command, code));
             }
             if let Progress::Complete(data) = rx.on_packet(&packet)? {
+                if single_packet && rx.data_packets() > 1 {
+                    return Err(self.reject_split(&rx));
+                }
                 return Ok(data);
             }
         }
@@ -127,7 +188,7 @@ impl Client {
     /// them. Otherwise it is a timeout, which closes the connection (D22).
     async fn stalled(&mut self, command: Command, rx: &ChunkReceiver) -> Error {
         let udp_strict =
-            self.config.transport == Transport::Udp && self.config.reply_id_policy == ReplyIdPolicy::Strict;
+            self.transport() == Transport::Udp && self.config.reply_id_policy == ReplyIdPolicy::Strict;
         match rx.streaming_size() {
             Some(expected) if udp_strict => {
                 tracing::warn!(
