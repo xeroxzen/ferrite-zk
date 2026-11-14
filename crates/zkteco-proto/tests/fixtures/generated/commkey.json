@@ -1,0 +1,427 @@
+{
+ "generator": "tools/gen_fixtures.py",
+ "pyzk_commit": "1af361a00a662fafa56700e6bc5806afe0199c3c",
+ "seed": 20261114,
+ "cases": [
+  {
+   "password": 0,
+   "session_id": 30383,
+   "ticks": 255,
+   "key": "acb0ffc2"
+  },
+  {
+   "password": 1,
+   "session_id": 39028,
+   "ticks": 50,
+   "key": "61fd32e1"
+  },
+  {
+   "password": 12,
+   "session_id": 35021,
+   "ticks": 50,
+   "key": "614d32f1"
+  },
+  {
+   "password": 45,
+   "session_id": 61602,
+   "ticks": 110,
+   "key": "3d956ed5"
+  },
+  {
+   "password": 123456,
+   "session_id": 3291,
+   "ticks": 0,
+   "key": "144d00c7"
+  },
+  {
+   "password": 999999,
+   "session_id": 44867,
+   "ticks": 0,
+   "key": "10b300d4"
+  },
+  {
+   "password": 28580600,
+   "session_id": 2097,
+   "ticks": 176,
+   "key": "bbe0b0ce"
+  },
+  {
+   "password": 62925151,
+   "session_id": 61072,
+   "ticks": 255,
+   "key": "384aff46"
+  },
+  {
+   "password": 32673102,
+   "session_id": 54416,
+   "ticks": 178,
+   "key": "538fb2dd"
+  },
+  {
+   "password": 64377451,
+   "session_id": 1260,
+   "ticks": 50,
+   "key": "2bab3209"
+  },
+  {
+   "password": 98262347,
+   "session_id": 26193,
+   "ticks": 255,
+   "key": "1762fff5"
+  },
+  {
+   "password": 4230387,
+   "session_id": 3948,
+   "ticks": 255,
+   "key": "9d7fffa5"
+  },
+  {
+   "password": 13039127,
+   "session_id": 29566,
+   "ticks": 0,
+   "key": "3ca7009d"
+  },
+  {
+   "password": 32850863,
+   "session_id": 37487,
+   "ticks": 0,
+   "key": "90ba000a"
+  },
+  {
+   "password": 85927182,
+   "session_id": 52229,
+   "ticks": 255,
+   "key": "09c0ff70"
+  },
+  {
+   "password": 83598920,
+   "session_id": 63610,
+   "ticks": 50,
+   "key": "1b6f32ae"
+  },
+  {
+   "password": 22328058,
+   "session_id": 45056,
+   "ticks": 38,
+   "key": "383626b7"
+  },
+  {
+   "password": 37134161,
+   "session_id": 24072,
+   "ticks": 9,
+   "key": "a3cc0988"
+  },
+  {
+   "password": 30432863,
+   "session_id": 44617,
+   "ticks": 50,
+   "key": "1b8732c0"
+  },
+  {
+   "password": 45153806,
+   "session_id": 12025,
+   "ticks": 0,
+   "key": "2c3f0077"
+  },
+  {
+   "password": 65137197,
+   "session_id": 48317,
+   "ticks": 255,
+   "key": "f404fff0"
+  },
+  {
+   "password": 30497650,
+   "session_id": 61978,
+   "ticks": 0,
+   "key": "88010036"
+  },
+  {
+   "password": 62250664,
+   "session_id": 35968,
+   "ticks": 50,
+   "key": "1d683243"
+  },
+  {
+   "password": 48767800,
+   "session_id": 18523,
+   "ticks": 50,
+   "key": "a5613226"
+  },
+  {
+   "password": 46899847,
+   "session_id": 37815,
+   "ticks": 50,
+   "key": "279c321f"
+  },
+  {
+   "password": 17041480,
+   "session_id": 50463,
+   "ticks": 255,
+   "key": "bca2ff51"
+  },
+  {
+   "password": 72510719,
+   "session_id": 64159,
+   "ticks": 50,
+   "key": "5682323d"
+  },
+  {
+   "password": 83430985,
+   "session_id": 34535,
+   "ticks": 199,
+   "key": "e51ac7aa"
+  },
+  {
+   "password": 49802294,
+   "session_id": 31596,
+   "ticks": 255,
+   "key": "94dcffde"
+  },
+  {
+   "password": 56602027,
+   "session_id": 35814,
+   "ticks": 230,
+   "key": "037ce62b"
+  },
+  {
+   "password": 96255674,
+   "session_id": 3399,
+   "ticks": 255,
+   "key": "d1edfffe"
+  },
+  {
+   "password": 9044422,
+   "session_id": 44599,
+   "ticks": 172,
+   "key": "7f80ac18"
+  },
+  {
+   "password": 75826807,
+   "session_id": 15582,
+   "ticks": 50,
+   "key": "019332a4"
+  },
+  {
+   "password": 28127942,
+   "session_id": 12139,
+   "ticks": 255,
+   "key": "e0d3ff50"
+  },
+  {
+   "password": 77581780,
+   "session_id": 22431,
+   "ticks": 167,
+   "key": "40c3a7bc"
+  },
+  {
+   "password": 36477268,
+   "session_id": 55642,
+   "ticks": 57,
+   "key": "f05c397f"
+  },
+  {
+   "password": 7640807,
+   "session_id": 53423,
+   "ticks": 255,
+   "key": "c557ff4a"
+  },
+  {
+   "password": 60144418,
+   "session_id": 26599,
+   "ticks": 50,
+   "key": "bf393268"
+  },
+  {
+   "password": 71936887,
+   "session_id": 2860,
+   "ticks": 255,
+   "key": "795eff29"
+  },
+  {
+   "password": 35426838,
+   "session_id": 20987,
+   "ticks": 68,
+   "key": "5e634485"
+  },
+  {
+   "password": 11958581,
+   "session_id": 58976,
+   "ticks": 255,
+   "key": "331cffe7"
+  },
+  {
+   "password": 16923206,
+   "session_id": 57917,
+   "ticks": 99,
+   "key": "6d4e630a"
+  },
+  {
+   "password": 65600675,
+   "session_id": 15400,
+   "ticks": 55,
+   "key": "5bbd372f"
+  },
+  {
+   "password": 81437374,
+   "session_id": 33171,
+   "ticks": 117,
+   "key": "634775e2"
+  },
+  {
+   "password": 68689771,
+   "session_id": 19200,
+   "ticks": 255,
+   "key": "5466ffd7"
+  },
+  {
+   "password": 6200893,
+   "session_id": 12493,
+   "ticks": 50,
+   "key": "18c132d3"
+  },
+  {
+   "password": 95617506,
+   "session_id": 1684,
+   "ticks": 255,
+   "key": "2cf7ff60"
+  },
+  {
+   "password": 5106572,
+   "session_id": 42714,
+   "ticks": 255,
+   "key": "7481ffec"
+  },
+  {
+   "password": 18553184,
+   "session_id": 28777,
+   "ticks": 255,
+   "key": "35b6fffc"
+  },
+  {
+   "password": 46202871,
+   "session_id": 12904,
+   "ticks": 50,
+   "key": "9e92324c"
+  },
+  {
+   "password": 18269242,
+   "session_id": 50394,
+   "ticks": 231,
+   "key": "90f4e781"
+  },
+  {
+   "password": 64439552,
+   "session_id": 45040,
+   "ticks": 0,
+   "key": "f04f00d0"
+  },
+  {
+   "password": 18002068,
+   "session_id": 13277,
+   "ticks": 50,
+   "key": "6c543205"
+  },
+  {
+   "password": 61784852,
+   "session_id": 48984,
+   "ticks": 0,
+   "key": "9767007e"
+  },
+  {
+   "password": 24244051,
+   "session_id": 38255,
+   "ticks": 138,
+   "key": "210f8ae2"
+  },
+  {
+   "password": 36888391,
+   "session_id": 29416,
+   "ticks": 50,
+   "key": "9a9f32c6"
+  },
+  {
+   "password": 40377574,
+   "session_id": 64475,
+   "ticks": 0,
+   "key": "6a280059"
+  },
+  {
+   "password": 17886215,
+   "session_id": 14287,
+   "ticks": 50,
+   "key": "569d3239"
+  },
+  {
+   "password": 91154001,
+   "session_id": 49993,
+   "ticks": 0,
+   "key": "3bc50072"
+  },
+  {
+   "password": 64432432,
+   "session_id": 62443,
+   "ticks": 50,
+   "key": "f47132a6"
+  },
+  {
+   "password": 54279349,
+   "session_id": 63545,
+   "ticks": 36,
+   "key": "4ac6245b"
+  },
+  {
+   "password": 82954615,
+   "session_id": 19192,
+   "ticks": 74,
+   "key": "8aeb4adb"
+  },
+  {
+   "password": 85459746,
+   "session_id": 53404,
+   "ticks": 255,
+   "key": "6cf4ff5d"
+  },
+  {
+   "password": 53396833,
+   "session_id": 48256,
+   "ticks": 50,
+   "key": "c5fb3248"
+  },
+  {
+   "password": 32878215,
+   "session_id": 17903,
+   "ticks": 0,
+   "key": "26ae00be"
+  },
+  {
+   "password": 60539796,
+   "session_id": 20802,
+   "ticks": 50,
+   "key": "a5543252"
+  },
+  {
+   "password": 84542874,
+   "session_id": 47638,
+   "ticks": 50,
+   "key": "c0243273"
+  },
+  {
+   "password": 42951521,
+   "session_id": 14012,
+   "ticks": 119,
+   "key": "e3be771b"
+  },
+  {
+   "password": 99611182,
+   "session_id": 24211,
+   "ticks": 0,
+   "key": "033b001d"
+  },
+  {
+   "password": 28550898,
+   "session_id": 59067,
+   "ticks": 30,
+   "key": "2b1e1ee1"
+  }
+ ]
+}

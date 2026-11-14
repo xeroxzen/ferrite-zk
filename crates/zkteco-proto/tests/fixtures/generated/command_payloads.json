@@ -1,0 +1,117 @@
+{
+ "generator": "tools/gen_fixtures.py",
+ "pyzk_commit": "1af361a00a662fafa56700e6bc5806afe0199c3c",
+ "seed": 20261114,
+ "cases": [
+  {
+   "name": "set_time 2074-01-20T14:41:29",
+   "command": 202,
+   "payload": "19a7dd8d"
+  },
+  {
+   "name": "unlock 1",
+   "command": 31,
+   "payload": "0a000000"
+  },
+  {
+   "name": "unlock 3",
+   "command": 31,
+   "payload": "1e000000"
+  },
+  {
+   "name": "unlock 10",
+   "command": 31,
+   "payload": "64000000"
+  },
+  {
+   "name": "test_voice 0",
+   "command": 1017,
+   "payload": "00000000"
+  },
+  {
+   "name": "test_voice 5",
+   "command": 1017,
+   "payload": "05000000"
+  },
+  {
+   "name": "test_voice 55",
+   "command": 1017,
+   "payload": "37000000"
+  },
+  {
+   "name": "write_lcd 1 Hello",
+   "command": 66,
+   "payload": "0100002048656c6c6f"
+  },
+  {
+   "name": "reg_event 1",
+   "command": 500,
+   "payload": "01000000"
+  },
+  {
+   "name": "reg_event 0",
+   "command": 500,
+   "payload": "00000000"
+  },
+  {
+   "name": "delete_user 1",
+   "command": 18,
+   "payload": "0100"
+  },
+  {
+   "name": "delete_user 300",
+   "command": 18,
+   "payload": "2c01"
+  },
+  {
+   "name": "delete_user 65535",
+   "command": 18,
+   "payload": "ffff"
+  },
+  {
+   "name": "delete_user_template 1 0",
+   "command": 19,
+   "payload": "010000"
+  },
+  {
+   "name": "delete_user_template 300 9",
+   "command": 19,
+   "payload": "2c0109"
+  },
+  {
+   "name": "get_pin_width",
+   "command": 69,
+   "payload": "2050"
+  },
+  {
+   "name": "sdk_build",
+   "command": 12,
+   "payload": "53444b4275696c643d31"
+  },
+  {
+   "name": "prepare_buffer users",
+   "command": 1503,
+   "payload": "0109000500000000000000"
+  },
+  {
+   "name": "prepare_buffer attendance",
+   "command": 1503,
+   "payload": "010d000000000000000000"
+  },
+  {
+   "name": "prepare_buffer templates",
+   "command": 1503,
+   "payload": "0107000200000000000000"
+  },
+  {
+   "name": "enroll tcp 1234 3",
+   "command": 61,
+   "payload": "3132333400000000000000000000000000000000000000000301"
+  },
+  {
+   "name": "enroll udp 1234 3",
+   "command": 61,
+   "payload": "d204000003"
+  }
+ ]
+}

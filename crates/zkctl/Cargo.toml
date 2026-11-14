@@ -1,0 +1,16 @@
+[package]
+name = "zkctl"
+description = "Command-line tool for ZKTeco biometric and access-control devices, built on zkteco-client (pyzk feature parity). Part of the Ferrite project."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+# Not published until it has real functionality (phase 3 for zkteco-client, phase 6 for zkctl).
+publish = false
+
+[lints]
+workspace = true

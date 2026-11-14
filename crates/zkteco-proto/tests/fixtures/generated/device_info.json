@@ -1,0 +1,115 @@
+{
+ "generator": "tools/gen_fixtures.py",
+ "pyzk_commit": "1af361a00a662fafa56700e6bc5806afe0199c3c",
+ "seed": 20261114,
+ "cases": {
+  "replies": {
+   "~SerialNumber": "7e53657269616c4e756d6265723d434b4a4131393437363031323300",
+   "~Platform": "7e506c6174666f726d3d5a4d4d3232305f54465400",
+   "MAC": "4d41433d30303a31373a36313a31323a33343a353600",
+   "~DeviceName": "7e4465766963654e616d653d4b34302f494400",
+   "ZKFaceVersion": "5a4b4661636556657273696f6e3d3700",
+   "~ZKFPVersion": "7e5a4b465056657273696f6e3d313000",
+   "~ExtendFmt": "7e457874656e64466d743d3100",
+   "~UserExtFmt": "7e55736572457874466d743d3100",
+   "FaceFunOn": "4661636546756e4f6e3d3000",
+   "CompatOldFirmware": "436f6d7061744f6c644669726d776172653d3000",
+   "IPAddress": "4950416464726573733d3139322e302e322e313000",
+   "NetMask": "4e65744d61736b3d3235352e3235352e3235352e3000",
+   "GATEIPAddress": "474154454950416464726573733d3139322e302e322e3100",
+   "__version__": "56657220362e363020417072203238203230313700",
+   "__pin_width__": "090000000000000000",
+   "__time__": "18867933"
+  },
+  "results": {
+   "serial_number": "CKJA194760123",
+   "platform": "ZMM220_TFT",
+   "mac": "00:17:61:12:34:56",
+   "device_name": "K40/ID",
+   "face_version": 7,
+   "fp_version": 10,
+   "extend_fmt": 1,
+   "user_extend_fmt": 1,
+   "face_fun_on": 0,
+   "compat_old_firmware": 0,
+   "network": {
+    "ip": "192.0.2.10",
+    "mask": "255.255.255.0",
+    "gateway": "192.0.2.1"
+   },
+   "firmware_version": "Ver 6.60 Apr 28 2017",
+   "pin_width": 9,
+   "time": "2026-11-14T09:30:00"
+  },
+  "requests": [
+   {
+    "command": 1000,
+    "payload": ""
+   },
+   {
+    "command": 11,
+    "payload": "7e53657269616c4e756d62657200"
+   },
+   {
+    "command": 11,
+    "payload": "7e506c6174666f726d00"
+   },
+   {
+    "command": 11,
+    "payload": "4d414300"
+   },
+   {
+    "command": 11,
+    "payload": "7e4465766963654e616d6500"
+   },
+   {
+    "command": 11,
+    "payload": "5a4b4661636556657273696f6e00"
+   },
+   {
+    "command": 11,
+    "payload": "7e5a4b465056657273696f6e00"
+   },
+   {
+    "command": 11,
+    "payload": "7e457874656e64466d7400"
+   },
+   {
+    "command": 11,
+    "payload": "7e55736572457874466d7400"
+   },
+   {
+    "command": 11,
+    "payload": "4661636546756e4f6e00"
+   },
+   {
+    "command": 11,
+    "payload": "436f6d7061744f6c644669726d7761726500"
+   },
+   {
+    "command": 11,
+    "payload": "49504164647265737300"
+   },
+   {
+    "command": 11,
+    "payload": "4e65744d61736b00"
+   },
+   {
+    "command": 11,
+    "payload": "4741544549504164647265737300"
+   },
+   {
+    "command": 1100,
+    "payload": ""
+   },
+   {
+    "command": 69,
+    "payload": "2050"
+   },
+   {
+    "command": 201,
+    "payload": ""
+   }
+  ]
+ }
+}

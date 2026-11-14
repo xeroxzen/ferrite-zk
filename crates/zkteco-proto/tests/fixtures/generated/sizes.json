@@ -1,0 +1,67 @@
+{
+ "generator": "tools/gen_fixtures.py",
+ "pyzk_commit": "1af361a00a662fafa56700e6bc5806afe0199c3c",
+ "seed": 20261114,
+ "cases": [
+  {
+   "payload": "b4640100345002006f9800003bdf02009aa2000038b90200c48202002c16020082e302003a17000097560000d0310100fd35020003c70000d7410000490f0000d8ff0100794102005473010044640100",
+   "users": 41626,
+   "fingers": 164548,
+   "records": 189314,
+   "cards": 144893,
+   "fingers_cap": 16855,
+   "users_cap": 3913,
+   "rec_cap": 131032,
+   "fingers_av": 147833,
+   "users_av": 95060,
+   "rec_av": 91204,
+   "faces": 0,
+   "faces_cap": 0
+  },
+  {
+   "payload": "db3702004078000059960000d3680100db980100bace0200b7270200528b0200b4350100d3460200882f0200c8ab0200b26d00003f8202009907010085700000ecc302005f0b020053ba0100e1040200030000000000000090010000",
+   "users": 104667,
+   "fingers": 141239,
+   "records": 79284,
+   "cards": 28082,
+   "fingers_cap": 67481,
+   "users_cap": 28805,
+   "rec_cap": 181228,
+   "fingers_av": 133983,
+   "users_av": 113235,
+   "rec_av": 132321,
+   "faces": 3,
+   "faces_cap": 400
+  },
+  {
+   "payload": "aeb80200e9080200dbdb00002c0e0100c036020028d0000094520100bdb60100da0a03000540020072eb00001a7401005b5c0000970702005d92010017960000c8a90100a14b0200f8f80000fa4a0100",
+   "users": 145088,
+   "fingers": 86676,
+   "records": 199386,
+   "cards": 23643,
+   "fingers_cap": 103005,
+   "users_cap": 38423,
+   "rec_cap": 109000,
+   "fingers_av": 150433,
+   "users_av": 63736,
+   "rec_av": 84730,
+   "faces": 0,
+   "faces_cap": 0
+  },
+  {
+   "payload": "48390000e25b00009adc000002a30100392d0000702c020079c4010056d302005b1702003874000091c30200094f01000e9802000bb9010035840100a55802001f230000651701004729010057510000000000000700000000000000",
+   "users": 11577,
+   "fingers": 115833,
+   "records": 137051,
+   "cards": 169998,
+   "fingers_cap": 99381,
+   "users_cap": 153765,
+   "rec_cap": 8991,
+   "fingers_av": 71525,
+   "users_av": 76103,
+   "rec_av": 20823,
+   "faces": 0,
+   "faces_cap": 0
+  }
+ ]
+}

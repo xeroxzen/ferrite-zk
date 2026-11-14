@@ -1,0 +1,70 @@
+{
+ "generator": "tools/gen_fixtures.py",
+ "pyzk_commit": "1af361a00a662fafa56700e6bc5806afe0199c3c",
+ "seed": 20261114,
+ "cases": [
+  {
+   "transport": "udp",
+   "size": 100,
+   "reads": [
+    [
+     0,
+     100
+    ]
+   ],
+   "free_data_sent": true
+  },
+  {
+   "transport": "udp",
+   "size": 16384,
+   "reads": [
+    [
+     0,
+     16384
+    ]
+   ],
+   "free_data_sent": true
+  },
+  {
+   "transport": "udp",
+   "size": 21600,
+   "reads": [
+    [
+     0,
+     16384
+    ],
+    [
+     16384,
+     5216
+    ]
+   ],
+   "free_data_sent": true
+  },
+  {
+   "transport": "tcp",
+   "size": 72000,
+   "reads": [
+    [
+     0,
+     65472
+    ],
+    [
+     65472,
+     6528
+    ]
+   ],
+   "free_data_sent": true
+  },
+  {
+   "transport": "tcp",
+   "size": 65472,
+   "reads": [
+    [
+     0,
+     65472
+    ]
+   ],
+   "free_data_sent": true
+  }
+ ]
+}

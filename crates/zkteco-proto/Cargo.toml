@@ -1,0 +1,29 @@
+[package]
+name = "zkteco-proto"
+description = "Sans-IO implementation of the ZKTeco device protocol (packets, checksums, comm key, record layouts, time encoding), with pyzk parity. Part of the Ferrite project."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/zkteco-proto"
+
+[dependencies]
+bitflags.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
