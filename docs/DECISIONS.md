@@ -228,3 +228,51 @@ replaced with same-length synthetic values. `tests/captures.rs` rejects
 unmarked files with template-sized payloads in template exchanges; it runs
 in CI and from an opt-in pre-commit hook (`.githooks/pre-commit`). Details in
 `tests/fixtures/captures/README.md`.
+
+## D22. Client request/reply discipline (phase 3)
+
+- **One request in flight**, `&mut self` methods, one `Client` per device.
+- **A timeout closes the connection.** Without it, a late reply could be
+  read as the answer to the next request (pyzk's failure mode). The error is
+  `Error::Timeout { command, after }`; later calls return
+  `ConnectionClosed` until `Client::reconnect`. I/O and TCP framing errors
+  close it too. A bad checksum under `ChecksumPolicy::Reject` does not: the
+  frame was consumed whole, so the stream is still in sync.
+- **Reply ID mismatches are logged and accepted.** No capture shows whether
+  every firmware echoes the reply ID; rejecting would break such devices.
+  Because a timeout closes the connection, a stale reply cannot arrive on a
+  live connection anyway.
+- **Stray live events** that arrive while waiting for a reply are
+  acknowledged (reply ID 0) and skipped, at most 256 per reply.
+- **Retries** (`RetryPolicy`, default 3 attempts, as pyzk): connection-level
+  failures while connecting, and malformed, short or refused chunk replies.
+  Before a chunk retry the client drains the line until `AckOk` or 250 ms of
+  silence. Authentication failures are never retried.
+- **`FreeData`** follows every staged read, including failed ones while the
+  connection is open. An inline (`Data`) reply stages nothing, so no
+  `FreeData` is sent (as pyzk).
+
+## D23. Client operation semantics (phase 3)
+
+- `users`/`attendance` detect the layout from the announced table length and
+  the count from `read_sizes`, unless `ClientConfig::user_format` /
+  `attendance_format` is set. The user layout is remembered for writes.
+  `set_user` and `save_user_templates` on a device with no users and no
+  configured layout fail with `UnsupportedRecordFormat` instead of guessing
+  (pyzk guesses 72 bytes from TCP reachability).
+- `attendance` does not fill user IDs into short (8/16-byte) records from
+  the user table, as pyzk does with an extra full user download. Join on
+  `uid` if needed.
+- `user_template` returns `None` when the device replies with a failure,
+  and retries only malformed replies. pyzk retries any failure three times
+  and then returns `None`.
+- `delete_user_template{,_by_user_id}` return `Ok(false)` for `AckError`
+  (pyzk: "probably empty"); other failures are errors.
+- `lock_state` reports whether `CMD_DOORSTATE_RRQ` succeeded, as pyzk
+  does. The payload is undecoded.
+- Option getters return the raw text. pyzk converts some to integers;
+  `records::options::parse_int` is available.
+- `restart`, `poweroff` and `disconnect` consume the client.
+- Only TCP is implemented; `Transport::Udp` returns `Error::Unsupported`
+  until phase 4. Enrolment and live capture come in phase 5.
+

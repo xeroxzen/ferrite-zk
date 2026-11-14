@@ -7,7 +7,7 @@ a bare `zk` prefix, because on crates.io that means zero-knowledge proofs.
 | Crate | Type | Purpose | Status |
 |---|---|---|---|
 | `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 (phase 2, done) |
-| `zkteco-client` | lib | Async tokio client over TCP and UDP | unpublished; phases 3 to 5 |
+| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP done (phase 3); unpublished |
 | `zkctl` | bin | CLI for manual testing and ops against devices | unpublished; phase 6 |
 
 ## Workspace
@@ -35,8 +35,19 @@ ferrite-zk/
 │   │       ├── golden.rs      # byte-for-byte agreement with pyzk
 │   │       ├── proptest.rs    # round trips; decoders total and terminating
 │   │       └── captures.rs    # replays tests/fixtures/captures/*.json
-│   ├── zkteco-client/         # phases 3 to 5
-│   │   └── tests/support/     # mock device (tokio, TCP + UDP)
+│   ├── zkteco-client/
+│   │   ├── src/
+│   │   │   ├── client.rs      # connect/auth/disconnect, request/reply, timeouts
+│   │   │   ├── transfer.rs    # staged chunked reads, drain, uploads
+│   │   │   ├── data.rs        # users, attendance, templates
+│   │   │   ├── device.rs      # info, options, time, control commands
+│   │   │   ├── link.rs        # framed TCP socket
+│   │   │   ├── config.rs      # ClientConfig, RetryPolicy
+│   │   │   └── error.rs       # Error
+│   │   └── tests/
+│   │       ├── support/       # mock device with fault injection
+│   │       ├── tcp.rs         # client against the mock
+│   │       └── hardware.rs    # real device, --features hardware
 │   └── zkctl/                 # phase 6
 ├── tests/fixtures/captures/   # maintainer's device captures (excluded from crates)
 ├── tools/                     # GPL-2.0-only fixture generator (never packaged)
@@ -68,10 +79,12 @@ ferrite-zk/
   re-connects, re-authenticates and re-subscribes with backoff. The
   regression tests for unexpected payload lengths and coalesced TCP events
   are written against the mock before the stream is implemented.
-- **Errors** (`zkteco_client::Error`): `Timeout`, `Unauthorized`,
-  `DeviceError { reply }`, `Malformed`, `UnsupportedRecordFormat`,
-  `ShortRead { expected, got }`, `ConnectionClosed`, `Io`, and wrapped
-  `ProtoError`.
+- **Errors** (`zkteco_client::Error`): `Io`, `Timeout { command, after }`,
+  `Unauthorized`, `DeviceError { command, reply }`, `Malformed(ProtoError)`,
+  `UnsupportedRecordFormat { kind, detail }`, `ShortRead { expected, got }`,
+  `ConnectionClosed`, `Unsupported`, `InvalidArgument(ProtoError)`.
+- **Timeouts close the connection**; retries cover connecting and corrupt
+  chunks (D22).
 - **Destructive operations** (`clear_attendance`, `clear_data`,
   `delete_user`, `set_user`, `poweroff`, `restart`) are tagged in rustdoc.
   `zkctl` requires `--yes` for them, and hardware tests run them only with
@@ -81,7 +94,9 @@ ferrite-zk/
 
 - `zkteco-proto`: `bytes`, `chrono` (no default features), `encoding_rs`,
   `thiserror`, `bitflags`, `tracing`. Dev: `proptest`, `serde_json`, `hex`.
-- `zkteco-client`, planned: `tokio`, `futures-core`, `pin-project-lite`.
+- `zkteco-client`: `tokio` (net, time, io-util), plus the shared `bytes`,
+  `chrono`, `thiserror`, `tracing`. Phase 5 adds `futures-core` for the
+  live-capture stream.
 - `zkctl`, planned: `clap`, `anyhow`, `tracing-subscriber`.
 
 Every crate uses `unsafe_code = "forbid"`. The MSRV is 1.88 (D19).

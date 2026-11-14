@@ -9,8 +9,24 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 exclude.workspace = true
-# Not published until it has real functionality (phase 3 for zkteco-client, phase 6 for zkctl).
+# Not published until the maintainer reviews phase 3.
 publish = false
+
+[features]
+# Enables tests against a real device (tests/hardware.rs). See that file for
+# the environment variables.
+hardware = []
+
+[dependencies]
+bytes.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time", "io-util"] }
+tracing.workspace = true
+zkteco-proto.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "time", "io-util", "rt", "macros", "sync"] }
 
 [lints]
 workspace = true
