@@ -42,6 +42,9 @@
 //! - Table decoding isolates bad records: see [`zkteco_proto::Batch`].
 //! - Live events that arrive while waiting for a reply are acknowledged and
 //!   queued, never dropped silently: see [`Client::take_pending_events`].
+//! - [`Client::live_capture`] turns the client into a cancel-safe
+//!   [`LiveCapture`] stream, optionally reconnecting; [`LiveCapture::stop`]
+//!   gives the client back.
 //! - Users have two identities, [`Uid`] (device slot) and [`UserId`] (the ID
 //!   people see); they are distinct types.
 //! - Methods documented as **Destructive** change or erase device data.
@@ -55,8 +58,10 @@ mod config;
 mod data;
 mod device;
 mod diag;
+mod enroll;
 mod error;
 mod link;
+mod live;
 mod record;
 mod transfer;
 mod write;
@@ -66,11 +71,13 @@ pub use config::{ClientConfig, ReplyIdPolicy, RetryPolicy, Transport, DEFAULT_PO
 pub use data::{RawTable, ResolvedAttendance, UserIdSource};
 pub use device::NetworkParams;
 pub use diag::{SampledPacket, StreamSample};
+pub use enroll::{EnrollOptions, EnrollOutcome};
 pub use error::{Error, Result};
+pub use live::{CaptureOptions, LiveCapture, ReconnectPolicy};
 pub use record::{Direction, RecordedPacket, Recording};
 pub use zkteco_proto;
 pub use zkteco_proto::records::attendance::{Attendance, AttendanceBatch};
-pub use zkteco_proto::records::event::LiveEvent;
+pub use zkteco_proto::records::event::{EnrollReport, LiveEvent};
 pub use zkteco_proto::records::finger::Template;
 pub use zkteco_proto::records::user::{Privilege, User};
-pub use zkteco_proto::{Batch, Uid, UserId};
+pub use zkteco_proto::{Batch, EventFlags, Uid, UserId};

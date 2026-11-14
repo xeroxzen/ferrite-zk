@@ -7,7 +7,7 @@ a bare `zk` prefix, because on crates.io that means zero-knowledge proofs.
 | Crate | Type | Purpose | Status |
 |---|---|---|---|
 | `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 (phase 2, done) |
-| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP and UDP done (phase 4); unpublished |
+| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP and UDP, live capture and enrolment done (phase 5); unpublished |
 | `zkctl` | bin + lib | CLI for manual testing and ops against devices | `diagnose` done; rest phase 6; unpublished |
 
 ## Workspace
@@ -86,10 +86,11 @@ ferrite-zk/
   the `Client` and returns `LiveCapture`, a
   `Stream<Item = Result<LiveEvent>>`. `LiveCapture::stop().await`
   unsubscribes and gives the `Client` back. Dropping it closes the socket
-  (there is no async drop). A reconnecting variant owns the config and
-  re-connects, re-authenticates and re-subscribes with backoff. The
-  regression tests for unexpected payload lengths and coalesced TCP events
-  are written against the mock before the stream is implemented.
+  (there is no async drop). With `CaptureOptions::reconnect` it
+  re-connects, re-authenticates and re-subscribes with backoff. The stream
+  stores its in-flight step, so `next()` is cancel-safe (D29).
+- **Enrolment** (`enroll_user`) is a plain `&mut self` method that reads
+  enrolment reports until a result, then restores verify mode (D30).
 - **Errors** (`zkteco_client::Error`): `Io`, `Timeout { command, after }`,
   `Unauthorized`, `DeviceError { command, reply }`, `Malformed(ProtoError)`,
   `UnsupportedRecordFormat { kind, detail }`, `ShortRead { expected, got }`,
@@ -99,7 +100,7 @@ ferrite-zk/
   chunks (D22). Over UDP a stream stalled mid-chunk is a retryable short
   read instead (D25).
 - **Destructive operations** (`clear_attendance`, `clear_data`,
-  `delete_user`, `set_user`, `poweroff`, `restart`) are tagged in rustdoc.
+  `delete_user`, `set_user`, `poweroff`, `restart`, `enroll_user`) are tagged in rustdoc.
   `zkctl` requires `--yes` for them, and hardware tests run them only with
   `ZK_ALLOW_DESTRUCTIVE=1`.
 
@@ -108,8 +109,8 @@ ferrite-zk/
 - `zkteco-proto`: `bytes`, `chrono` (no default features), `encoding_rs`,
   `thiserror`, `bitflags`, `tracing`. Dev: `proptest`, `serde_json`, `hex`.
 - `zkteco-client`: `tokio` (net, time, io-util), plus the shared `bytes`,
-  `chrono`, `thiserror`, `tracing`. Phase 5 adds `futures-core` for the
-  live-capture stream.
+  `chrono`, `thiserror`, `tracing`, and `futures-core` for the
+  live-capture `Stream` trait. Dev: `futures-util`.
 - `zkctl`: `clap`, `anyhow`, `serde`/`serde_json`, `hex`,
   `tracing-subscriber`.
 

@@ -208,7 +208,9 @@ impl Client {
     ///
     /// Device or timeout errors.
     pub async fn enable_device(&mut self) -> Result<()> {
-        self.ack(Command::EnableDevice, &[]).await.map(drop)
+        self.ack(Command::EnableDevice, &[]).await?;
+        self.device_disabled = false;
+        Ok(())
     }
 
     /// Disable the device's keypad and sensors (`CMD_DISABLEDEVICE`), for
@@ -218,7 +220,9 @@ impl Client {
     ///
     /// Device or timeout errors.
     pub async fn disable_device(&mut self) -> Result<()> {
-        self.ack(Command::DisableDevice, &[]).await.map(drop)
+        self.ack(Command::DisableDevice, &[]).await?;
+        self.device_disabled = true;
+        Ok(())
     }
 
     /// Make the device reload its data after changes (`CMD_REFRESHDATA`).

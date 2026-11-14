@@ -8,7 +8,10 @@
 //! `ZK_TRANSPORT` defaults to `tcp`, so results stay comparable across
 //! runs; UDP reads use the default single-datagram chunking.
 //!
-//! Read-only tests always run. Tests that change device data (create and
+//! Read-only tests always run, as does a short live capture (which changes
+//! no data; it leaves the device in verify mode). Set `ZK_CAPTURE_SECS` to
+//! listen longer and punch in meanwhile. Enrolment is not tested here: it
+//! needs a finger on the sensor. Tests that change device data (create and
 //! delete a temporary user, copy and delete a template, set the clock) run
 //! only with `ZK_ALLOW_DESTRUCTIVE=1`, and clean up after themselves.
 //!
@@ -20,7 +23,7 @@
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use zkteco_client::{Client, ClientConfig, Error, Transport};
+use zkteco_client::{CaptureOptions, Client, ClientConfig, Error, LiveEvent, Transport};
 use zkteco_proto::records::user::{self, Privilege, User};
 
 /// Devices usually accept one connection at a time.
@@ -200,5 +203,30 @@ async fn destructive_set_time() {
     let after = client.time().await.unwrap();
     let drift = (after - before).num_seconds();
     assert!((0..=5).contains(&drift), "clock moved by {drift} s");
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_capture_subscribes_and_stops() {
+    let _device = DEVICE.lock().await;
+    let secs: u64 =
+        std::env::var("ZK_CAPTURE_SECS").map_or(3, |s| s.parse().expect("ZK_CAPTURE_SECS is a number"));
+    let client = Client::connect(config()).await.unwrap();
+    let mut capture = client.live_capture(CaptureOptions::default()).await.unwrap();
+    let until = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let (mut punches, mut other) = (0, 0);
+    while let Ok(item) = tokio::time::timeout_at(until, capture.next()).await {
+        match item.expect("stream ended early").unwrap() {
+            LiveEvent::Attendance(_) => punches += 1,
+            LiveEvent::Raw { flag, payload } => {
+                other += 1;
+                eprintln!("raw event: flag {flag:?}, {} bytes", payload.len());
+            }
+        }
+    }
+    eprintln!("live capture: {punches} attendance events, {other} other in {secs} s");
+    let (mut client, result) = capture.stop().await;
+    result.unwrap();
+    client.firmware_version().await.unwrap();
     client.disconnect().await.unwrap();
 }

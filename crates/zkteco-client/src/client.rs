@@ -43,6 +43,9 @@ pub struct Client {
     /// Chunk size for single-datagram UDP reads; shrinks if the device
     /// splits replies into smaller packets.
     pub(crate) udp_chunk: u32,
+    /// Whether this client disabled the device (`CMD_DISABLEDEVICE`) and
+    /// has not enabled it since.
+    pub(crate) device_disabled: bool,
 }
 
 /// The first single-datagram chunk size over UDP: the per-packet size seen
@@ -116,6 +119,7 @@ impl Client {
             recording: None,
             wire,
             udp_chunk: UDP_SINGLE_DATAGRAM,
+            device_disabled: false,
         };
         client.handshake().await?;
         Ok(client)
@@ -173,7 +177,9 @@ impl Client {
         let pending = std::mem::take(&mut self.pending);
         let recording = self.recording.take();
         let (dropped, discarded) = (self.dropped_events, self.discarded_replies);
+        let disabled = self.device_disabled;
         *self = fresh;
+        self.device_disabled = disabled;
         self.pending = pending;
         self.recording = recording;
         self.dropped_events = dropped;
@@ -365,8 +371,7 @@ impl Client {
     /// Acknowledge a live event and add its contents to the pending queue,
     /// dropping the oldest entries when it is full.
     pub(crate) async fn queue_event(&mut self, packet: &Packet) -> Result<()> {
-        let ack = self.session.event_ack();
-        self.send_raw(&ack).await?;
+        self.ack_event().await?;
         let capacity = self.config.pending_event_capacity;
         for event in event::decode(packet, self.config.encoding)? {
             if self.pending.len() >= capacity {
@@ -384,6 +389,22 @@ impl Client {
             self.pending.push_back(event);
         }
         Ok(())
+    }
+
+    /// Acknowledge an event packet (`CMD_ACK_OK` with reply ID 0).
+    pub(crate) async fn ack_event(&mut self) -> Result<()> {
+        let ack = self.session.event_ack();
+        self.send_raw(&ack).await
+    }
+
+    /// Put an event back at the front of the pending queue.
+    pub(crate) fn unpop_pending(&mut self, event: LiveEvent) {
+        self.pending.push_front(event);
+    }
+
+    /// The oldest pending live event, if any.
+    pub(crate) fn pop_pending(&mut self) -> Option<LiveEvent> {
+        self.pending.pop_front()
     }
 
     /// Remove and return the live events that arrived while the client was

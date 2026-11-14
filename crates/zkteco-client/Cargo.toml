@@ -20,12 +20,14 @@ hardware = []
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true
+futures-core.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "time", "io-util"] }
 tracing.workspace = true
 zkteco-proto.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 tokio = { workspace = true, features = ["net", "time", "io-util", "rt", "macros", "sync"] }
 
 [lints]

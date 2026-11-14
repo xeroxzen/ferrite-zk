@@ -121,6 +121,19 @@ pub struct DeviceState {
     pub uploaded: Option<Vec<u8>>,
     /// Upload buffers committed with `SaveUserTemps`.
     pub saved_bulk: Vec<Vec<u8>>,
+    /// Event masks received with `RegEvent`, in order.
+    pub event_masks: Vec<u32>,
+    /// Report payloads sent as event packets right after acknowledging
+    /// `StartEnroll`, with their flags.
+    pub enroll_script: Vec<(EventFlags, Vec<u8>)>,
+    /// `StartEnroll` payloads received.
+    pub enroll_requests: Vec<Vec<u8>>,
+    /// Unframed packets waiting to be pushed to the client unprompted.
+    pub outbox: Vec<Vec<u8>>,
+    /// Close the connection the next time the outbox is delivered.
+    pub close_pushed: bool,
+    /// Packets to send after the replies to the current request.
+    pub(crate) trailing: Vec<Vec<u8>>,
     pub(crate) authenticated: bool,
     pub(crate) staged: Option<Vec<u8>>,
     pub(crate) upload: Option<(usize, Vec<u8>)>,
@@ -159,6 +172,12 @@ impl Default for DeviceState {
             events_sent: 0,
             uploaded: None,
             saved_bulk: Vec::new(),
+            event_masks: Vec::new(),
+            enroll_script: Vec::new(),
+            enroll_requests: Vec::new(),
+            outbox: Vec::new(),
+            close_pushed: false,
+            trailing: Vec::new(),
             authenticated: false,
             staged: None,
             upload: None,
@@ -224,10 +243,12 @@ impl DeviceState {
                 last[2] ^= 0xFF;
             }
         }
+        replies.append(&mut self.trailing);
         Outcome { replies, close }
     }
 
-    fn event_packet(&mut self) -> Vec<u8> {
+    /// An `ATTLOG` event for the next user ID (counting up from 1).
+    pub fn event_packet(&mut self) -> Vec<u8> {
         self.events_sent += 1;
         let a = Attendance {
             uid: None,
@@ -487,6 +508,17 @@ impl DeviceState {
                 }
             }
             Command::ClearAttLog | Command::ClearData => self.clear(cmd),
+            Command::RegEvent => {
+                self.event_masks
+                    .push(u32::from_le_bytes([p[0], p[1], p[2], p[3]]));
+                self.ok(Vec::new())
+            }
+            Command::StartEnroll => {
+                self.enroll_requests.push(p.to_vec());
+                let script = std::mem::take(&mut self.enroll_script);
+                self.trailing = script.iter().map(|(f, r)| event_with(*f, r)).collect();
+                self.ok(Vec::new())
+            }
             Command::RefreshData
             | Command::EnableDevice
             | Command::DisableDevice
@@ -621,4 +653,10 @@ pub fn templates(uids: &[u16], len: usize) -> Vec<Template> {
             ),
         })
         .collect()
+}
+
+/// An event packet with these flags and payload.
+pub fn event_with(flags: EventFlags, payload: &[u8]) -> Vec<u8> {
+    let flags = u16::try_from(flags.bits()).unwrap();
+    packet::encode(Command::RegEvent, flags, 0, payload).to_vec()
 }

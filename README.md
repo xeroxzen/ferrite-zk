@@ -3,11 +3,16 @@
 A Rust implementation of the ZKTeco device protocol (port 4370, TCP and UDP),
 built for feature parity with [pyzk](https://github.com/fananimi/pyzk).
 
-**Status:** phase 4 of 6, plus `zkctl diagnose`. `zkteco-proto` (the
-sans-IO protocol layer) is implemented and tested, version `0.1.0-alpha.1`.
-`zkteco-client` works over TCP and UDP (tested against a mock device; not
-yet published). Live capture, enrolment and the rest of `zkctl` are still to
-come.
+**Status:** phase 5 of 6. `zkteco-proto` (the sans-IO protocol layer) is
+implemented and tested, version `0.1.0-alpha.1`. `zkteco-client` works over
+TCP and UDP, with live capture and fingerprint enrolment (tested against a
+mock device; not yet published). `zkctl` has `diagnose`; the rest of it is
+phase 6.
+
+**Hardware status: untested on physical devices.** Every layout and flow is
+implemented from the protocol manual and the reference implementation and
+tested against a mock device only. See
+[Help wanted: device reports](#help-wanted-device-reports).
 
 | Crate | Purpose |
 |---|---|
@@ -44,6 +49,45 @@ Serial number and MAC are scrubbed unless `--include-identifiers` is given.
 [tests/fixtures/captures](tests/fixtures/captures/README.md) format; review
 them before committing.
 
+## Live capture
+
+```rust
+let client = Client::connect(ClientConfig::new("192.168.1.201")).await?;
+let mut capture = client.live_capture(CaptureOptions::default()).await?;
+while let Some(event) = capture.next().await {
+    if let LiveEvent::Attendance(punch) = event? {
+        println!("{:?} at {}", punch.user_id, punch.timestamp);
+    }
+}
+let (client, result) = capture.stop().await;
+```
+
+`next()` is cancel-safe, so it can sit in a `tokio::select!` with a
+shutdown signal. `CaptureOptions::reconnect` keeps the stream alive across
+dropped connections; a heartbeat (default 60 s) detects a device that went
+away without closing the connection (D29).
+
+## Help wanted: device reports
+
+The project has no device to test against. If you own a ZKTeco device,
+running `zkctl diagnose` against it is the most useful contribution you can
+make. It is read-only: the client refuses every command outside a fixed
+allowlist of reads before anything is sent, so it cannot change users,
+logs or settings.
+
+```sh
+ZK_PASSWORD=0 cargo run -p zkctl -- diagnose <device-ip> -o report.json
+```
+
+The report holds the firmware version, platform, record layouts, counts and
+packet sizes. Serial number and MAC are scrubbed by default; it contains no
+user records. Please read it before sharing, then open an issue with the
+report attached and the device model from its label. Each report becomes a
+row in [COMPATIBILITY.md](docs/COMPATIBILITY.md) and answers some of the
+open questions in [DECISIONS.md](docs/DECISIONS.md#open-questions-blocked-on-zkctl-diagnose-reports-from-hardware).
+Packet captures (`--capture DIR`) help even more; they are scrubbed too, but
+review them before attaching.
+
 ## Parity table
 
 "Unverified" means the wire layout has not been confirmed by a capture from
@@ -77,12 +121,13 @@ the mock device over both transports.
 | `save_user_template`, `HR_save_usertemplates` | `save_user_templates` | `finger::encode_bulk_save` | client (TCP, UDP) | yes | N |
 | `delete_user_template` (by uid) | `delete_user_template` | `requests::template_by_uid` | client (TCP, UDP) | yes | N |
 | `delete_user_template` (by user ID) | `delete_user_template_by_user_id` (TCP: command 134; UDP: resolves the uid, as pyzk) | `requests::template_by_user_id` | client (TCP, UDP) | **yes, never exercised by pyzk** | N (on HW list) |
-| `enroll_user` | `enroll_user` | `requests::start_enroll_*`, `event::decode_enroll_report` | proto done; client phase 5 | yes | N |
+| `enroll_user` | `enroll_user(&UserId, fid, opts, progress)` (destructive; no by-uid form) | `requests::start_enroll_*`, `event::decode_enroll_report` | client (TCP, UDP) | yes (report semantics, D30) | N |
 | `cancel_capture` / `verify_user` | same | commands | client (TCP, UDP) | yes | N |
 | `get_attendance` | `attendance` (as stored), `attendance_with_users` (user IDs resolved, D23) | `records::attendance` (8/16/40/49) | client (TCP, UDP) | yes | N |
 | `clear_attendance` / `clear_data` | same (destructive) | commands | client (TCP, UDP) | yes | N |
-| `live_capture` | `live_capture` -> `Stream` of `LiveEvent` | `records::event` (`LiveEvent`), `TcpFrameDecoder` | proto done; client phase 5 | yes | N |
-| `reg_event` | internal | `requests::reg_event` | proto done; client phase 5 | yes | N |
+| `live_capture` | `live_capture` -> `LiveCapture` (`Stream` of `LiveEvent`), `LiveCapture::connect` | `records::event` (`LiveEvent`), `TcpFrameDecoder` | client (TCP, UDP) | yes | N |
+| `reg_event` | `CaptureOptions::events` | `requests::reg_event` | client (TCP, UDP) | yes | N |
+| `end_live_capture` | `LiveCapture::stop` | `requests::reg_event` (empty mask) | client (TCP, UDP) | yes | N |
 | `unlock` / `get_lock_state` | `unlock` / `lock_state` | `requests::unlock` | client (TCP, UDP) | yes (lock state payload unknown) | N |
 | `write_lcd` / `clear_lcd` | same | `requests::write_lcd` | client (TCP, UDP) | yes | N |
 | `set_sdk_build_1` | `set_option` | `options::encode_write` | client (TCP, UDP) | yes | N |

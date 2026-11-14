@@ -453,3 +453,102 @@ list.
   the captures pass `zkteco-proto`'s replay test.
 - The password can come from `ZK_PASSWORD`, which keeps it out of shell
   history.
+
+## D29. Live capture
+
+- `Client::live_capture(self, CaptureOptions)` subscribes and returns
+  `LiveCapture`, a `Stream<Item = Result<LiveEvent>>` that also has an
+  inherent `next()`. Subscribing follows the reference flow: optionally
+  read the user table (`resolve_users`), cancel any capture and enter
+  verify mode (`prepare`, default on), enable the device if this client had
+  disabled it, then `CMD_REG_EVENT` with the mask (default `ATTLOG`).
+  `stop()` sends an empty mask, disables the device again if the capture
+  enabled it, and returns the `Client`.
+- Every event is acknowledged on arrival, decoded with
+  `records::event::decode` (unknown lengths and other event types become
+  `LiveEvent::Raw`, never dropped, D9) and queued; the stream yields from
+  the queue, so events queued before the capture come first and several
+  records in one packet, or several packets in one TCP read, all arrive in
+  order.
+- Cancel safety: the stream owns a boxed future for the step in progress,
+  which owns the capture state. Dropping a `next()` future drops nothing
+  but the poll; the next call resumes the same step. Each step waits at
+  most one second (`IDLE_TICK`) for a packet; an idle step returns
+  `Pending` after waking itself instead of looping, so there is no
+  unbounded loop inside the stream. `stop()` finishes a step in flight and
+  puts any event it received back on the client's pending queue.
+- Errors do not end the stream by themselves. If the connection survives
+  (a bad checksum), capture continues. If it is lost, the stream ends, or
+  with `CaptureOptions::reconnect` (a `ReconnectPolicy`: attempts, initial
+  and maximum backoff, doubling) reconnects and resubscribes, yielding each
+  failure as an `Err`. It ends after `max_attempts` consecutive failures or
+  on `Unauthorized`.
+- Heartbeat (default 60 s): after that long without a packet the stream
+  sends `CMD_GET_TIME`. Without it a device that vanishes without closing
+  TCP (power loss) would never be noticed. pyzk has no heartbeat. Whether
+  devices answer commands while subscribed is not known (open question
+  Q6); if one does not, the symptom is a timeout every heartbeat, and
+  `heartbeat: None` turns it off.
+- `resolve_users` fills whichever of `uid` and `user_id` an attendance
+  event lacks from the user table read at subscription. The map is not
+  refreshed until the next subscription.
+- Reconnecting is inside the stream rather than a wrapper type, so that
+  the client (with its pending queue and counters) survives it via
+  `Client::reconnect`.
+
+## D30. Enrolment
+
+- `enroll_user(&UserId, fid, EnrollOptions, progress)` is **destructive**
+  (it adds a template). It checks `fid <= 9` and encodes the user ID
+  before sending anything, then sends `CMD_CANCELCAPTURE` and
+  `CMD_STARTENROLL` (TCP: 24-byte user ID, finger, 1; UDP: `u32` user ID,
+  finger, so the user ID must be numeric). By-uid enrolment is not
+  offered; resolve the user ID with `users()` first.
+- It then reads event packets, acknowledging each, with
+  `EnrollOptions::report_timeout` (default 60 s, as pyzk) per report and at
+  most 32 reports. Packets with `ATTLOG` set are queued as live events;
+  every other event packet is an enrolment report (first `u16` a result
+  code). Each report is passed to `progress`.
+- The outcome follows the reports, not a fixed count of scans: `0x64`
+  counts a scan, other unknown codes are passed on and ignored, and the
+  first of stored (0), failed (4), duplicate (5) or timed out (6) ends it.
+  pyzk instead reads exactly two reports per scan for three scans, and over
+  TCP treats a 0 in the first report of a pair as failure; reports carry no
+  flag it checks. Since the meaning of a stored report before any accepted
+  scan is unclear, it is returned as `EnrollOutcome::Unexpected`. No report
+  in time is `NoReport`.
+- Cleanup always runs: unsubscribe (empty mask), cancel capture, verify
+  mode. If cleanup fails after an outcome, the cleanup error is returned and
+  the outcome logged; if the enrolment itself failed, its error wins.
+- Not cancel-safe, documented: a dropped future leaves the device in
+  enrolment mode.
+
+## Open questions (blocked on `zkctl diagnose` reports from hardware)
+
+No hardware is available. Nothing in the code assumes an answer to these;
+the defaults are the conservative choice in each case. They are listed so
+that the first diagnose reports can close them.
+
+- **Q1. UDP sequence numbers.** Do streamed UDP `Data` packets carry a
+  sequence number in the session ID field, as over TCP? Until a report
+  shows it, UDP reads stay single-datagram (D25) and nothing checks or
+  relies on UDP sequence numbers. Answered by
+  `udp_stream_headers.session_ids` in the report.
+- **Q2. UDP packet size.** Is the UDP `Data` payload 1,008 bytes (the TCP
+  value), 1,016 (1,024 minus the 8-byte header) or something else? The
+  single-datagram chunk stays 1,008 and shrinks if replies are split; no
+  code assumes 1,016. Answered by `udp_stream_headers.packet_sizes`.
+- **Q3. Reply IDs.** Do all devices echo the request's reply ID on every
+  packet of a reply, including streamed packets? `Strict` stays the
+  default; diagnose falls back to `Lenient` only to measure.
+- **Q4. User and attendance layouts per firmware.** The compatibility table
+  (D27) stays empty until diagnose reports fill it; no rows come from
+  documentation or issue reports.
+- **Q5. Zero-flag events.** Does any firmware send attendance events with
+  an empty flag field? Decoding accepts it by payload length (D9); a
+  capture would confirm or remove that path.
+- **Q6. Requests while subscribed.** Does a device answer commands (the
+  heartbeat's `CMD_GET_TIME`) while events are registered? D29 assumes so.
+- **Q7. Enrolment reports.** Which event flag carries enrolment reports, how
+  many reports a scan produces, and what a 0 code before any accepted scan
+  means (D30).
