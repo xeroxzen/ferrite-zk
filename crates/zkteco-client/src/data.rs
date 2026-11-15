@@ -133,6 +133,7 @@ impl Client {
             Some(f) => f,
             None => AttendanceFormat::detect(announced, records)?,
         };
+        self.detected_attendance_format = Some(format);
         Ok(attendance::decode_table_as(&data, format, self.config.encoding)?)
     }
 

@@ -1,0 +1,36 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: json(&a)
+---
+[
+  {
+    "card": 7,
+    "disabled": false,
+    "group_id": "1",
+    "has_password": false,
+    "name": "User 1",
+    "privilege": "user",
+    "uid": 1,
+    "user_id": "1001"
+  },
+  {
+    "card": 14,
+    "disabled": false,
+    "group_id": "1",
+    "has_password": false,
+    "name": "User 2",
+    "privilege": "user",
+    "uid": 2,
+    "user_id": "1002"
+  },
+  {
+    "card": 21,
+    "disabled": false,
+    "group_id": "1",
+    "has_password": false,
+    "name": "User 3",
+    "privilege": "user",
+    "uid": 3,
+    "user_id": "1003"
+  }
+]

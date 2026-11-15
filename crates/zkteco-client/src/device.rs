@@ -326,25 +326,25 @@ impl Client {
         self.ack(Command::ClearData, &[]).await.map(drop)
     }
 
-    /// **Destructive.** Restart the device. The session ends, so this
-    /// consumes the client.
+    /// **Destructive.** Restart the device. The session ends: the
+    /// connection is closed afterwards.
     ///
     /// # Errors
     ///
     /// Device or timeout errors.
-    pub async fn restart(mut self) -> Result<()> {
+    pub async fn restart(&mut self) -> Result<()> {
         let result = self.ack(Command::Restart, &[]).await;
         self.close().await;
         result.map(drop)
     }
 
-    /// **Destructive.** Power the device off. The session ends, so this
-    /// consumes the client.
+    /// **Destructive.** Power the device off. The session ends: the
+    /// connection is closed afterwards.
     ///
     /// # Errors
     ///
     /// Device or timeout errors.
-    pub async fn poweroff(mut self) -> Result<()> {
+    pub async fn poweroff(&mut self) -> Result<()> {
         let result = self.ack(Command::PowerOff, &[]).await;
         self.close().await;
         result.map(drop)

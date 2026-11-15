@@ -1,0 +1,20 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: json(&a)
+---
+[
+  {
+    "host": "10.1.2.4",
+    "name": "back",
+    "port": null,
+    "timeout": null,
+    "transport": null
+  },
+  {
+    "host": "10.1.2.3",
+    "name": "front",
+    "port": 4371,
+    "timeout": null,
+    "transport": "udp"
+  }
+]

@@ -81,7 +81,7 @@ impl Capture {
             return Step::Event(event);
         }
         if let Some(queued) = self.client.pop_pending() {
-            return self.admit(queued, Source::Live).map_or(Step::Idle, Step::Event);
+            return self.admit(queued).map_or(Step::Idle, Step::Event);
         }
         if !self.client.is_connected() {
             return self.recover().await;
@@ -91,13 +91,14 @@ impl Capture {
             return Step::Failed(e);
         }
         match self.client.pop_pending() {
-            Some(queued) => self.admit(queued, Source::Live).map_or(Step::Idle, Step::Event),
+            Some(queued) => self.admit(queued).map_or(Step::Idle, Step::Event),
             None => Step::Idle,
         }
     }
 
     /// Resolve, deduplicate and timestamp an event. `None` for a duplicate.
-    fn admit(&mut self, queued: Queued, source: Source) -> Option<CapturedEvent> {
+    fn admit(&mut self, queued: Queued) -> Option<CapturedEvent> {
+        let source = queued.source;
         let event = self.resolve(queued.event);
         let device_time = match &event {
             LiveEvent::Attendance(a) => {
@@ -231,10 +232,11 @@ impl Capture {
         for record in batch.records.into_iter().filter(|r| r.record.timestamp >= since) {
             let queued = Queued {
                 event: LiveEvent::Attendance(record.record),
+                source: Source::Backfill,
                 at,
                 instant,
             };
-            if let Some(event) = self.admit(queued, Source::Backfill) {
+            if let Some(event) = self.admit(queued) {
                 self.backfilled.push_back(event);
                 added += 1;
             }
@@ -276,6 +278,7 @@ impl Capture {
         for event in first.into_iter().chain(rest).rev() {
             self.client.unpop_pending(Queued {
                 event: event.event,
+                source: event.source,
                 at: event.received_at,
                 instant: event.received_instant,
             });

@@ -251,9 +251,12 @@ async fn serve_udp(socket: UdpSocket, state: Arc<Mutex<DeviceState>>, mut pushed
         let Ok((n, peer)) = received else {
             return;
         };
-        last_peer = Some(peer);
         let raw = bytes::Bytes::copy_from_slice(&buf[..n]);
         let request = packet::decode(raw, ChecksumPolicy::Reject).expect("client checksums are valid");
+        // A client that has said goodbye takes no more pushed packets;
+        // otherwise this task could steal events meant for a later TCP
+        // connection.
+        last_peer = (request.header.command != Command::Exit).then_some(peer);
         let outcome = {
             let mut st = state.lock().unwrap();
             if request.header.command == Command::Connect {

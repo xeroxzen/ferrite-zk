@@ -9,8 +9,8 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 exclude.workspace = true
-# Not published until the maintainer reviews phase 3.
-publish = false
+readme = "README.md"
+documentation = "https://docs.rs/zkteco-client"
 
 [features]
 # Enables tests against a real device (tests/hardware.rs). See that file for
@@ -29,7 +29,7 @@ zkteco-proto.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-tokio = { workspace = true, features = ["net", "time", "io-util", "rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["net", "time", "io-util", "rt", "rt-multi-thread", "macros", "sync", "signal"] }
 
 [lints]
 workspace = true

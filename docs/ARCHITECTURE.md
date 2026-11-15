@@ -6,9 +6,10 @@ a bare `zk` prefix, because on crates.io that means zero-knowledge proofs.
 
 | Crate | Type | Purpose | Status |
 |---|---|---|---|
-| `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 (phase 2, done) |
-| `zkteco-client` | lib | Async tokio client over TCP and UDP | TCP and UDP, live capture and enrolment done (phase 5); unpublished |
-| `zkctl` | bin + lib | CLI for manual testing and ops against devices | `diagnose` done; rest phase 6; unpublished |
+| `zkteco-proto` | lib | Sans-IO protocol: packets, checksums, comm key, records, time | 0.1.0-alpha.1 |
+| `zkteco-client` | lib | Async tokio client over TCP and UDP | 0.1.0-alpha.1 |
+| `zkctl` | bin + lib | CLI for operations and diagnostics against devices | 0.1.0-alpha.1 |
+| `xtask` | bin | Man pages and completion scripts (`cargo xtask`) | never published |
 
 ## Workspace
 
@@ -43,10 +44,14 @@ ferrite-zk/
 │   │   │   ├── device.rs      # info, options, time, control commands
 │   │   │   ├── link.rs        # Link: framed TCP stream or connected UDP socket
 │   │   │   ├── compat.rs      # COMPATIBILITY table (mirrors docs/COMPATIBILITY.md), device facts
+│   │   │   ├── live/          # LiveCapture: capture loop, reconnect, backfill, dedup
+│   │   │   ├── enroll.rs      # fingerprint enrolment
+│   │   │   ├── write.rs       # user and template writes and deletes
 │   │   │   ├── record.rs      # packet recording for diagnostics
 │   │   │   ├── diag.rs        # UDP stream sampling (headers only)
 │   │   │   ├── config.rs      # ClientConfig, Transport, RetryPolicy, READ_ONLY_COMMANDS
 │   │   │   └── error.rs       # Error
+│   │   ├── examples/          # run against the mock by tests/examples.rs
 │   │   └── tests/
 │   │       ├── support/       # mock device with fault injection
 │   │       ├── tcp.rs         # client against the mock over TCP
@@ -55,15 +60,25 @@ ferrite-zk/
 │   │       └── hardware.rs    # real device, --features hardware
 │   └── zkctl/
 │       ├── src/
-│       │   ├── main.rs        # clap CLI
+│       │   ├── main.rs        # parse, logging, runtime, exit code
+│       │   ├── cli.rs         # clap definitions (also used by xtask)
+│       │   ├── cmd/           # one module per command
+│       │   ├── target.rs      # -d/--host -> ClientConfig, password lookup, connect
+│       │   ├── profiles.rs    # config.toml
+│       │   ├── secrets.rs     # OS keyring, password prompt
+│       │   ├── output.rs      # human/json/ndjson records
+│       │   ├── exit.rs        # exit codes and error classification
 │       │   ├── diagnose.rs    # read-only survey -> COMPATIBILITY row
+│       │   ├── live_probe.rs  # diagnose --probe-live
 │       │   ├── capture.rs     # recording -> scrubbed capture JSON
 │       │   └── streams.rs     # describes a UDP stream sample
-│       └── tests/diagnose.rs  # against zkteco-client's mock (shared via #[path])
+│       └── tests/             # real binary against zkteco-client's mock (via #[path]); insta snapshots
+├── xtask/                     # cargo xtask man|completions
 ├── tests/fixtures/captures/   # maintainer's device captures (excluded from crates)
 ├── tools/                     # GPL-2.0-only fixture generator (never packaged)
-├── docs/{PROTOCOL,ARCHITECTURE,DECISIONS,COMPATIBILITY}.md
-└── .github/workflows/ci.yml   # fmt, clippy -D warnings, tests, docs, MSRV, fixture drift
+├── docs/{GUIDE,PROTOCOL,ARCHITECTURE,DECISIONS,COMPATIBILITY,RELEASING}.md
+├── deny.toml                  # cargo-deny: licenses, advisories, sources
+└── .github/workflows/ci.yml   # fmt, clippy, tests, docs, MSRV, deny, publish dry run, fixture drift
 ```
 
 ## Boundaries
@@ -77,7 +92,7 @@ ferrite-zk/
   and chunk loops with retries, uploads, enrolment and live capture. It owns
   sockets, timeouts, retry policy and reconnects.
 
-## Client design (phases 3 to 5)
+## Client design
 
 - **One request in flight per connection.** The protocol is strict
   request/response, so the client uses `&mut self` methods and needs no
@@ -111,7 +126,9 @@ ferrite-zk/
 - `zkteco-client`: `tokio` (net, time, io-util), plus the shared `bytes`,
   `chrono`, `thiserror`, `tracing`, and `futures-core` for the
   live-capture `Stream` trait. Dev: `futures-util`.
-- `zkctl`: `clap`, `anyhow`, `serde`/`serde_json`, `hex`,
-  `tracing-subscriber`.
+- `zkctl`: `clap`, `clap_complete`, `anyhow`, `serde`/`serde_json`, `toml`,
+  `directories`, `keyring`, `rpassword`, `chrono`, `hex`,
+  `tracing-subscriber`. Dev: `assert_cmd`, `insta`, `tempfile`.
+- `xtask`: `clap_mangen`, `clap_complete`.
 
 Every crate uses `unsafe_code = "forbid"`. The MSRV is 1.88 (D19).

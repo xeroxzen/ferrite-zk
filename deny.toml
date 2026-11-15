@@ -1,0 +1,44 @@
+# cargo-deny: licenses, advisories, bans and sources for the workspace.
+# Run with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# zbus 6 folded these crates into itself; the Linux Secret Service store used
+# by keyring 4 is still on zbus 5. They are "unmaintained" notices, not
+# vulnerabilities, and the code only runs on Linux when the keyring is used.
+# Remove once secret-service moves to zbus 6.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via keyring's zbus 5 Secret Service store; no maintained alternative yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via keyring's zbus 5 Secret Service store; no maintained alternative yet" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via keyring's zbus 5 Secret Service store; no maintained alternative yet" },
+]
+
+[licenses]
+version = 2
+# Permissive licenses only. Nothing GPL may enter the dependency graph of a
+# published crate; tools/ (GPL-2.0, pyzk-based fixture generator) is not a
+# crate and is not in this graph.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    # option-ext, via directories: file-level copyleft, unmodified, not GPL.
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

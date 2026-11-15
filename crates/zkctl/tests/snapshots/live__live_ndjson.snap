@@ -1,0 +1,48 @@
+---
+source: crates/zkctl/tests/live.rs
+expression: lines
+---
+[
+  {
+    "device": "[host]",
+    "device_time": "2026-01-02T03:04:05",
+    "kind": "attendance",
+    "punch": "check_in",
+    "punch_code": 0,
+    "received_at": "[received_at]",
+    "source": "live",
+    "status": "fingerprint",
+    "status_code": 1,
+    "uid": null,
+    "user_id": "1",
+    "workcode": null
+  },
+  {
+    "device": "[host]",
+    "device_time": "2026-01-02T03:04:05",
+    "kind": "attendance",
+    "punch": "check_in",
+    "punch_code": 0,
+    "received_at": "[received_at]",
+    "source": "live",
+    "status": "fingerprint",
+    "status_code": 1,
+    "uid": null,
+    "user_id": "2",
+    "workcode": null
+  },
+  {
+    "device": "[host]",
+    "device_time": "2026-01-02T03:04:05",
+    "kind": "attendance",
+    "punch": "check_in",
+    "punch_code": 0,
+    "received_at": "[received_at]",
+    "source": "live",
+    "status": "fingerprint",
+    "status_code": 1,
+    "uid": null,
+    "user_id": "3",
+    "workcode": null
+  }
+]

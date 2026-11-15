@@ -1,0 +1,9 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: stdout(&a)
+---
+{"type":"progress","report":"scan_accepted"}
+{"type":"progress","report":"scan_accepted"}
+{"type":"progress","report":"scan_accepted"}
+{"type":"progress","report":"stored"}
+{"type":"outcome","outcome":"stored","scans":3,"size":null,"position":null}

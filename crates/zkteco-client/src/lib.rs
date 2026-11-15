@@ -52,6 +52,8 @@
 //! Packets are logged with `tracing`: requests and replies at `trace` with
 //! hex dumps, recoveries at `warn`.
 
+#![deny(missing_docs)]
+
 mod client;
 pub mod compat;
 mod config;

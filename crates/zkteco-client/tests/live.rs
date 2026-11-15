@@ -476,8 +476,13 @@ async fn stop_keeps_undelivered_backfill() {
     assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), "1");
     let (mut client, result) = capture.stop().await;
     result.unwrap();
-    let kept: Vec<String> = client.take_pending_events().iter().map(event_user_id).collect();
-    assert_eq!(kept, ["2", "3"]);
+    let kept: Vec<(String, Source)> = client
+        .take_pending_captured()
+        .iter()
+        .map(|c| (event_user_id(&c.event), c.source))
+        .collect();
+    let backfill = |u: &str| (u.to_owned(), Source::Backfill);
+    assert_eq!(kept, [backfill("2"), backfill("3")]);
 }
 
 #[tokio::test]

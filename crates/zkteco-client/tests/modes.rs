@@ -92,3 +92,31 @@ async fn read_only_refuses_writes_before_sending() {
         );
     }
 }
+
+#[tokio::test]
+async fn dry_run_sends_no_writes_but_records_them() {
+    let dev = MockDevice::start(DeviceState {
+        users: users(3),
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config().dry_run(true)).await.unwrap();
+    client
+        .delete_user_by_user_id(&zkteco_client::UserId("1002".into()))
+        .await
+        .unwrap();
+    client.clear_attendance().await.unwrap();
+    let planned: Vec<Command> = client.take_planned().iter().map(|p| p.header.command).collect();
+    assert_eq!(
+        planned,
+        [Command::DeleteUser, Command::RefreshData, Command::ClearAttLog]
+    );
+    assert!(client.take_planned().is_empty());
+    for sent in dev.commands() {
+        assert!(
+            zkteco_client::READ_ONLY_COMMANDS.contains(&sent),
+            "{sent:?} was sent"
+        );
+    }
+    assert_eq!(dev.state().users.len(), 3);
+}

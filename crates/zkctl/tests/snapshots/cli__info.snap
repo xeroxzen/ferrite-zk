@@ -1,0 +1,27 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: v
+---
+{
+  "attendance_record_bytes": 40,
+  "device": "[host]",
+  "device_name": "Mock",
+  "firmware": "Ver 6.60 Mock",
+  "mac": "scrubbed",
+  "pin_width": 9,
+  "platform": "MOCK_TFT",
+  "serial_number": "scrubbed",
+  "sizes": {
+    "cards": 0,
+    "faces": null,
+    "fingers": 0,
+    "fingers_capacity": 0,
+    "records": 4,
+    "records_capacity": 0,
+    "users": 3,
+    "users_capacity": 0
+  },
+  "time": "2026-01-02T03:04:05",
+  "transport": "tcp",
+  "user_record_bytes": 72
+}

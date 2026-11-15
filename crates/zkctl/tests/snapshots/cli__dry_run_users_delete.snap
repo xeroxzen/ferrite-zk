@@ -1,0 +1,21 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: json(&a)
+---
+{
+  "dry_run": true,
+  "would_send": [
+    {
+      "code": 18,
+      "command": "DeleteUser",
+      "payload_hex": "0200",
+      "payload_len": 2
+    },
+    {
+      "code": 1013,
+      "command": "RefreshData",
+      "payload_hex": "",
+      "payload_len": 0
+    }
+  ]
+}

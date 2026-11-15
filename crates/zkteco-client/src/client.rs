@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use tokio::time::Instant;
 use zkteco_proto::commkey;
 use zkteco_proto::packet::{self, Packet};
+use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::records::event::{self, LiveEvent};
 use zkteco_proto::records::user::UserFormat;
 use zkteco_proto::session::Session;
@@ -12,6 +13,7 @@ use zkteco_proto::{Command, ProtoError};
 use crate::config::{ClientConfig, ReplyIdPolicy, Transport, READ_ONLY_COMMANDS};
 use crate::error::{Error, Result};
 use crate::link::{Link, TcpLink};
+use crate::live::{CapturedEvent, Source};
 use crate::record::{Direction, Recording};
 
 /// Packets (events, mismatched replies) accepted at most while waiting for
@@ -34,6 +36,8 @@ pub struct Client {
     session: Session,
     /// User layout detected from the last user table read.
     pub(crate) detected_user_format: Option<UserFormat>,
+    /// Attendance layout detected from the last attendance read.
+    pub(crate) detected_attendance_format: Option<AttendanceFormat>,
     /// Live events received while waiting for replies.
     pending: VecDeque<Queued>,
     dropped_events: u64,
@@ -44,6 +48,10 @@ pub struct Client {
     /// Chunk size for single-datagram UDP reads; shrinks if the device
     /// splits replies into smaller packets.
     pub(crate) udp_chunk: u32,
+    /// Writes recorded instead of sent, in dry-run mode.
+    planned: Vec<Packet>,
+    /// Synthesized replies to planned writes, answered before the socket.
+    synthetic: VecDeque<Packet>,
     /// Whether this client disabled the device (`CMD_DISABLEDEVICE`) and
     /// has not enabled it since.
     pub(crate) device_disabled: bool,
@@ -114,6 +122,7 @@ impl Client {
             link: Some(link),
             session: Session::new(),
             detected_user_format: None,
+            detected_attendance_format: None,
             pending: VecDeque::new(),
             dropped_events: 0,
             discarded_replies: 0,
@@ -121,6 +130,8 @@ impl Client {
             wire,
             udp_chunk: UDP_SINGLE_DATAGRAM,
             device_disabled: false,
+            planned: Vec::new(),
+            synthetic: VecDeque::new(),
         };
         client.handshake().await?;
         Ok(client)
@@ -179,7 +190,9 @@ impl Client {
         let recording = self.recording.take();
         let (dropped, discarded) = (self.dropped_events, self.discarded_replies);
         let disabled = self.device_disabled;
+        let planned = std::mem::take(&mut self.planned);
         *self = fresh;
+        self.planned = planned;
         self.device_disabled = disabled;
         self.pending = pending;
         self.recording = recording;
@@ -228,6 +241,20 @@ impl Client {
         self.recording.take().unwrap_or_default()
     }
 
+    /// The user layout in use: configured, or detected by the last user
+    /// table read. `None` before any read.
+    #[must_use]
+    pub fn user_format(&self) -> Option<UserFormat> {
+        self.config.user_format.or(self.detected_user_format)
+    }
+
+    /// The attendance layout in use: configured, or detected by the last
+    /// attendance read. `None` before any read.
+    #[must_use]
+    pub fn attendance_format(&self) -> Option<AttendanceFormat> {
+        self.config.attendance_format.or(self.detected_attendance_format)
+    }
+
     /// The configuration in use.
     #[must_use]
     pub fn config(&self) -> &ClientConfig {
@@ -267,8 +294,11 @@ impl Client {
     /// Send one packet. Every outgoing packet passes here, so this is where
     /// read-only mode is enforced.
     async fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        let command = Command::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+        if self.config.dry_run && !READ_ONLY_COMMANDS.contains(&command) {
+            return self.plan(bytes);
+        }
         if self.config.read_only {
-            let command = Command::from(u16::from_le_bytes([bytes[0], bytes[1]]));
             let subscription = command == Command::RegEvent && self.config.allow_event_subscription;
             if !READ_ONLY_COMMANDS.contains(&command) && !subscription {
                 tracing::warn!(?command, "refused: read-only client");
@@ -284,6 +314,34 @@ impl Client {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Record a write instead of sending it, and queue a synthesized
+    /// `CMD_ACK_OK` for it.
+    fn plan(&mut self, bytes: &[u8]) -> Result<()> {
+        let packet = packet::decode(
+            bytes::Bytes::copy_from_slice(bytes),
+            zkteco_proto::ChecksumPolicy::Reject,
+        )?;
+        tracing::info!(command = ?packet.header.command, len = packet.payload.len(), "dry run: not sent");
+        let reply = packet::encode(
+            Command::AckOk,
+            packet.header.session_id,
+            packet.header.reply_id,
+            &[],
+        );
+        self.synthetic.push_back(packet::decode(
+            reply.freeze(),
+            zkteco_proto::ChecksumPolicy::Reject,
+        )?);
+        self.planned.push(packet);
+        Ok(())
+    }
+
+    /// The packets a dry-run client would have sent, in order, since the
+    /// last call. Empty unless [`ClientConfig::dry_run`] is set.
+    pub fn take_planned(&mut self) -> Vec<Packet> {
+        std::mem::take(&mut self.planned)
     }
 
     /// Wait up to one request timeout for the packet answering `reply_id`.
@@ -311,6 +369,10 @@ impl Client {
     /// As [`recv_reply`](Self::recv_reply), but `None` when the deadline
     /// passes, leaving the connection open for the caller to decide.
     pub(crate) async fn wait_reply(&mut self, command: Command, reply_id: u16) -> Result<Option<Packet>> {
+        if let Some(reply) = self.synthetic.pop_front() {
+            debug_assert_eq!(reply.header.reply_id, reply_id);
+            return Ok(Some(reply));
+        }
         let deadline = Instant::now() + self.config.request_timeout;
         // The deadline ends the wait; the count bounds the loop regardless.
         for _ in 0..MAX_PACKETS_PER_REPLY {
@@ -389,7 +451,12 @@ impl Client {
                     continue;
                 }
             }
-            self.pending.push_back(Queued { event, at, instant });
+            self.pending.push_back(Queued {
+                event,
+                source: Source::Live,
+                at,
+                instant,
+            });
         }
         Ok(())
     }
@@ -416,6 +483,28 @@ impl Client {
         self.pending.drain(..).map(|q| q.event).collect()
     }
 
+    /// Like [`take_pending_events`](Self::take_pending_events), with each
+    /// event's source and arrival times. After [`LiveCapture::stop`] this
+    /// includes backfilled records that were not yet delivered, still
+    /// marked [`Source::Backfill`].
+    ///
+    /// [`LiveCapture::stop`]: crate::LiveCapture::stop
+    pub fn take_pending_captured(&mut self) -> Vec<CapturedEvent> {
+        self.pending
+            .drain(..)
+            .map(|q| CapturedEvent {
+                device_time: match &q.event {
+                    LiveEvent::Attendance(a) => Some(a.timestamp),
+                    LiveEvent::Raw { .. } => None,
+                },
+                event: q.event,
+                source: q.source,
+                received_at: q.at,
+                received_instant: q.instant,
+            })
+            .collect()
+    }
+
     /// Events dropped because the pending queue was full (see
     /// [`ClientConfig::pending_event_capacity`]), since the client was
     /// created.
@@ -429,6 +518,8 @@ impl Client {
 #[derive(Debug, Clone)]
 pub(crate) struct Queued {
     pub(crate) event: LiveEvent,
+    /// Live, or a backfilled record put back by `LiveCapture::stop`.
+    pub(crate) source: Source,
     /// Wall-clock arrival time.
     pub(crate) at: SystemTime,
     /// Monotonic arrival time.

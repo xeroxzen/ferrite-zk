@@ -1,0 +1,50 @@
+---
+source: crates/zkctl/tests/cli.rs
+expression: records
+---
+[
+  {
+    "device": "[host]",
+    "punch": "check_in",
+    "punch_code": 0,
+    "status": "fingerprint",
+    "status_code": 1,
+    "timestamp": "2026-01-01T08:00:00",
+    "uid": 1,
+    "user_id": "1001",
+    "workcode": null
+  },
+  {
+    "device": "[host]",
+    "punch": "check_in",
+    "punch_code": 0,
+    "status": "fingerprint",
+    "status_code": 1,
+    "timestamp": "2026-01-01T08:01:00",
+    "uid": 2,
+    "user_id": "1002",
+    "workcode": null
+  },
+  {
+    "device": "[host]",
+    "punch": "check_in",
+    "punch_code": 0,
+    "status": "fingerprint",
+    "status_code": 1,
+    "timestamp": "2026-01-01T08:02:00",
+    "uid": 3,
+    "user_id": "1003",
+    "workcode": null
+  },
+  {
+    "device": "[host]",
+    "punch": "check_in",
+    "punch_code": 0,
+    "status": "fingerprint",
+    "status_code": 1,
+    "timestamp": "2026-01-01T08:03:00",
+    "uid": 4,
+    "user_id": "1004",
+    "workcode": null
+  }
+]

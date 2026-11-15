@@ -124,6 +124,10 @@ pub struct DeviceState {
     pub uploaded: Option<Vec<u8>>,
     /// Upload buffers committed with `SaveUserTemps`.
     pub saved_bulk: Vec<Vec<u8>>,
+    /// Attendance records (by index) whose stored time is made invalid
+    /// (February 31st), so they are rejected when decoded. 40-byte layout
+    /// only.
+    pub corrupt_attendance: Vec<usize>,
     /// Event masks received with `RegEvent`, in order.
     pub event_masks: Vec<u32>,
     /// Report payloads sent as event packets right after acknowledging
@@ -175,6 +179,7 @@ impl Default for DeviceState {
             events_sent: 0,
             uploaded: None,
             saved_bulk: Vec::new(),
+            corrupt_attendance: Vec::new(),
             event_masks: Vec::new(),
             enroll_script: Vec::new(),
             enroll_requests: Vec::new(),
@@ -360,7 +365,15 @@ impl DeviceState {
                 user::encode_table(&self.users, self.user_format, enc).ok()
             }
             (Command::AttLogRrq, _) => {
-                attendance::encode_table(&self.attendance, self.attendance_format, enc).ok()
+                let mut table =
+                    attendance::encode_table(&self.attendance, self.attendance_format, enc).ok()?;
+                // 2000-02-31 in the packed form: day index 30 of month index 1.
+                let invalid = (31u32 + 30) * 86_400;
+                for &i in &self.corrupt_attendance {
+                    let at = 4 + i * 40 + 27;
+                    table[at..at + 4].copy_from_slice(&invalid.to_le_bytes());
+                }
+                Some(table)
             }
             (Command::DbRrq, table::FINGER_TEMPLATES) => finger::encode_table(&self.templates).ok(),
             _ => None,

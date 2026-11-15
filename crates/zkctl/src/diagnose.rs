@@ -288,7 +288,9 @@ async fn identifier(client: &mut Client, key: &str, opts: &Options) -> zkteco_cl
     }
 }
 
-fn sizes_of(s: &DeviceSizes) -> Sizes {
+/// Counters from `CMD_GET_FREE_SIZES` in report form.
+#[must_use]
+pub fn sizes_of(s: &DeviceSizes) -> Sizes {
     Sizes {
         users: s.users(),
         fingers: s.fingers(),

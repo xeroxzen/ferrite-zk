@@ -215,9 +215,10 @@ year old, and CI tests it.
 - Copyright holder: "Andile Jaden Mbele and the Ferrite contributors"
   (`LICENSE-MIT`). `LICENSE-APACHE` is the unmodified license text and there
   is no `NOTICE` file. Manifests do not use the optional `authors` field.
-- `zkteco-proto` is `0.1.0-alpha.1`, prepared and dry-run only; the
-  maintainer publishes it. `zkteco-client` and `zkctl` are `publish = false`
-  until they have real functionality. The workspace shares one version.
+- All three crates are `0.1.0-alpha.1`, prepared and dry-run only; the
+  maintainer publishes them (docs/RELEASING.md). The workspace shares one
+  version. `xtask` is `publish = false`. (Until phase 6, `zkteco-client`
+  and `zkctl` were `publish = false`.)
 
 ## D21. Biometric and personal data in captures
 
@@ -564,6 +565,82 @@ list.
   (`ClientConfig::allow_event_subscription`) and skips the preparation
   commands. It reports event flags and payload lengths, never payloads, and
   heartbeat answers; it answers Q5 and Q6.
+
+## D32. `zkctl` (phase 6)
+
+- **Thin layer.** Protocol behaviour stays in the client; the CLI resolves
+  targets, confirms, formats and maps errors to exit codes. Dry run is a
+  client feature for that reason: `ClientConfig::dry_run` routes every
+  command outside `READ_ONLY_COMMANDS` to a recording, answers it locally
+  with `CMD_ACK_OK`, and `Client::take_planned` returns the packets. So
+  `--dry-run` prints exactly what the real run would send, built by the same
+  code. **Reads still go to the device** (the brief said "sends nothing"):
+  writes depend on them (the next free uid, the user layout, resolving a
+  user ID). Tests assert that no non-allowlisted command reaches the mock.
+- **Access per command.** Read commands, `live` and `diagnose` use
+  read-only clients. `live` additionally allows `CMD_REG_EVENT`
+  (`allow_event_subscription`) and skips the preparation commands
+  (`CMD_CANCELCAPTURE`, `CMD_STARTVERIFY`), which change device state; the
+  device stays in whatever mode it was. `templates export` is read-only
+  too, but sits with the destructive commands in needing `--yes`, because
+  it moves biometric data.
+- **Exit codes** 0 to 7 as in `zkctl --help`. Classification walks the
+  error chain to the first `zkteco_client::Error`. Over several devices the
+  most serious outcome wins (any failure over partial over success).
+  Enrolment that ends in anything but "stored" exits 5.
+- **Output.** `--output json` is one document, `ndjson` one object per
+  line; `live` refuses `json` (exit 2), since a stream has no end to close
+  a document at. Field sets are pinned by snapshot tests. Device times are
+  printed without an offset (the device has no time zone); host times are
+  UTC with milliseconds. PINs are never printed (`has_password` instead),
+  except inside a template export file, which needs them to recreate users.
+- **`live`.** One task per device, each owning a `LiveCapture`, feeding one
+  printer over a bounded channel (4,096), so lines never interleave. Stop
+  (Ctrl-C, `--count`, `--duration`) goes to every task through a watch
+  channel; each unsubscribes and then emits what arrived during the stop
+  (`Client::take_pending_captured`, which keeps each event's source, so
+  undelivered backfill stays `backfill`). With `--reconnect`, attempts are
+  unlimited and the first connection is retried too; a rejected password
+  is never retried. `--count N` drops events after the Nth while stopping.
+- **`attendance pull --state FILE`.** A JSON cursor per device: the last
+  record emitted (user, time, status, punch). The next run emits records
+  after that record's position in the log; if it is no longer in the log
+  (cleared), records after its time. The file is replaced atomically after
+  output is written.
+- **Destructive confirmation.** `--yes` (dry run exempt). The clears also
+  need the device name typed, or `--confirm-device NAME`; without a
+  terminal and without the flag they abort (7). `restart` and `poweroff`
+  close the connection afterwards, so they take `&mut self` in the client
+  (they took `&self` before).
+- **Profiles and passwords.** `config.toml` under the platform config
+  directory (`directories`), `deny_unknown_fields`, so a `password` key is
+  an error rather than silently ignored. Password order: `--password`,
+  `ZK_PASSWORD`, keyring, prompt (only after the device rejects the
+  connection, and only with a terminal). Keyring calls run on the blocking
+  pool. The keyring crate is `keyring` 4 with its `v1` stores (macOS
+  Keychain, Windows Credential Manager, Secret Service over zbus on Linux).
+  The zbus 5 crates it pulls in are flagged unmaintained (RUSTSEC-2026-0370
+  to 0372, notices, not vulnerabilities; zbus 6 absorbed them); `deny.toml`
+  ignores those three IDs with that reason until the Secret Service store
+  moves to zbus 6.
+- **`diagnose`** moved under the shared device options. Its file flag is
+  `--out`/`-o`, because `--output` is now the global format flag; its
+  timeout is the global `--timeout` (10 s default, was 5 s).
+- **Man pages** come from the clap definitions via `cargo xtask man DIR`
+  (`clap_mangen`), completions from `zkctl completions SHELL` or
+  `cargo xtask completions DIR`.
+
+## D33. Release preparation
+
+- `cargo-deny` (`deny.toml`): permissive licenses only (MIT, Apache-2.0,
+  BSD-3-Clause, Unicode-3.0, and MPL-2.0 for `option-ext`, unmodified,
+  file-level copyleft), nothing GPL; advisories deny, with the three
+  ignores in D32; duplicate versions warn; crates.io only.
+- `zkctl`'s tests use the mock device from `zkteco-client/tests` via
+  `#[path]`, so they are excluded from its package; they run in this
+  repository only.
+- Library crates use `#![deny(missing_docs)]`; CI builds docs with
+  `-D rustdoc::broken_intra_doc_links`.
 
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 

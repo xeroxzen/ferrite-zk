@@ -24,7 +24,12 @@ jobs:
       - name: Capture privacy check (no unmarked templates)
         run: cargo test -p zkteco-proto --test captures
       - run: cargo test --workspace
-      - run: cargo doc --workspace --no-deps
+      - name: Docs (broken intra-doc links are errors)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
+      - name: Man pages and completions build
+        run: cargo xtask man target/man && cargo xtask completions target/completions
 
   msrv:
     runs-on: ubuntu-latest
@@ -44,6 +49,22 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  deny:
+    # Licenses (permissive only, no GPL), advisories, duplicate versions, sources.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  publish-dry-run:
+    # Packages and builds all three crates in dependency order, as crates.io would.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --workspace --dry-run
 
   fixtures:
     # Regenerates the golden fixtures from pyzk and fails if they drift.

@@ -1,75 +1,89 @@
 # Ferrite
 
-A Rust implementation of the ZKTeco device protocol (port 4370, TCP and UDP),
-built for feature parity with [pyzk](https://github.com/fananimi/pyzk).
+Rust crates and a command-line tool for ZKTeco biometric and
+access-control devices (the "ZK protocol", port 4370, TCP and UDP), with
+feature parity with [pyzk](https://github.com/fananimi/pyzk).
 
-**Status:** phase 5 of 6. `zkteco-proto` (the sans-IO protocol layer) is
-implemented and tested, version `0.1.0-alpha.1`. `zkteco-client` works over
-TCP and UDP, with live capture and fingerprint enrolment (tested against a
-mock device; not yet published). `zkctl` has `diagnose`; the rest of it is
-phase 6.
-
-**Hardware status: untested on physical devices.** Every layout and flow is
-implemented from the protocol manual and the reference implementation and
-tested against a mock device only. See
-[Help wanted: device reports](#help-wanted-device-reports).
+> **Status: alpha, untested on physical devices.** Version
+> `0.1.0-alpha.1`. Every layout and flow is implemented from the protocol
+> manual and the reference implementation and tested against a mock device
+> only. If you have a device, see [Help wanted](#help-wanted-device-reports).
 
 | Crate | Purpose |
 |---|---|
-| [`zkteco-proto`](crates/zkteco-proto) | Packets, checksums, comm key, record layouts, time encoding. No I/O. |
-| [`zkteco-client`](crates/zkteco-client) | Async tokio client (TCP and UDP) |
-| [`zkctl`](crates/zkctl) | CLI; `zkctl diagnose` so far (read-only) |
+| [`zkteco-proto`](crates/zkteco-proto) | Sans-IO protocol: packets, checksums, comm key, record layouts, time encoding |
+| [`zkteco-client`](crates/zkteco-client) | Async tokio client over TCP and UDP: data, live events, enrolment |
+| [`zkctl`](crates/zkctl) | Command-line tool: info, users, attendance export, live streaming, diagnostics |
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/DECISIONS.md](docs/DECISIONS.md) and
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
-
-## Transports
-
-`ClientConfig::transport` defaults to `Transport::Auto`: TCP, falling back to
-UDP if the device cannot be reached over TCP. Over UDP, table reads request
-one datagram's worth at a time, because UDP can reorder datagrams and the
-protocol gives no known way to detect it in larger chunks. pyzk's 16 KiB UDP
-chunks are not offered: they can return wrong records without an error
-(D25).
-
-## Surveying a device
-
-`zkctl diagnose` connects read-only (the client refuses any command outside
-an allowlist) and prints a JSON report shaped like a
-[COMPATIBILITY.md](docs/COMPATIBILITY.md) row:
+## Install
 
 ```sh
-ZK_PASSWORD=0 cargo run -p zkctl -- diagnose 192.168.1.201 \
-    --capture ./captures -o report.json
+cargo install zkctl --version 0.1.0-alpha.1
 ```
 
-Serial number and MAC are scrubbed unless `--include-identifiers` is given.
-`--capture` writes scrubbed packet captures in the
-[tests/fixtures/captures](tests/fixtures/captures/README.md) format; review
-them before committing.
+As a library:
 
-## Live capture
+```toml
+[dependencies]
+zkteco-client = "0.1.0-alpha.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Rust 1.88 or later.
+
+## In 30 seconds
+
+Command line:
+
+```sh
+zkctl device add front --host 192.168.1.201     # a named device
+zkctl device set-password front                 # comm key, in the OS keyring
+zkctl -d front info
+zkctl -d front users list --output json
+zkctl -d front attendance pull --since 24h --output ndjson
+zkctl -d front -d back live --reconnect --backfill --output ndjson
+```
+
+Library:
 
 ```rust
-let client = Client::connect(ClientConfig::new("192.168.1.201")).await?;
-let mut capture = client.live_capture(CaptureOptions::default()).await?;
-while let Some(event) = capture.next().await {
-    if let LiveEvent::Attendance(punch) = event?.event {
-        println!("{:?} at {}", punch.user_id, punch.timestamp);
+use zkteco_client::{CaptureOptions, Client, ClientConfig, LiveEvent};
+
+#[tokio::main]
+async fn main() -> zkteco_client::Result<()> {
+    let config = ClientConfig::new("192.168.1.201").password(0);
+    let mut client = Client::connect(config.clone().read_only(true)).await?;
+    for record in client.attendance().await?.records {
+        println!("{:?} {}", record.user_id, record.timestamp);
     }
+    client.disconnect().await?;
+
+    let client = Client::connect(config).await?;
+    let mut capture = client.live_capture(CaptureOptions::default()).await?;
+    while let Some(item) = capture.next().await {
+        if let LiveEvent::Attendance(punch) = item?.event {
+            println!("{:?} punched at {}", punch.user_id, punch.timestamp);
+        }
+    }
+    Ok(())
 }
-let (client, result) = capture.stop().await;
 ```
 
-`next()` is cancel-safe, so it can sit in a `tokio::select!` with a
-shutdown signal. Each item is a `CapturedEvent`: the event, its source
-(live or backfill), the device time, and the host's wall-clock and
-monotonic arrival times. `CaptureOptions::reconnect` keeps the stream alive
-across dropped connections, and `backfill` then reads the punches stored
-while disconnected, delivering each punch once. TCP keepalive and a
-heartbeat that tolerates missed answers detect a device that went away
-without closing the connection (D29, D31).
+More in [the examples](crates/zkteco-client/examples) and the
+[guide](docs/GUIDE.md).
+
+## Documentation
+
+- [docs/GUIDE.md](docs/GUIDE.md): getting started, transports, reliability,
+  live capture in production, several devices, errors and exit codes,
+  configuration, data protection.
+- [docs/PROTOCOL.md](docs/PROTOCOL.md): the wire protocol.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+  [docs/DECISIONS.md](docs/DECISIONS.md): design, and why.
+- [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md): devices and firmware seen
+  so far.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
+  [CHANGELOG.md](CHANGELOG.md).
 
 ## Help wanted: device reports
 
@@ -80,7 +94,7 @@ allowlist of reads before anything is sent, so it cannot change users,
 logs or settings.
 
 ```sh
-ZK_PASSWORD=0 cargo run -p zkctl -- diagnose <device-ip> --probe-live -o report.json
+ZK_PASSWORD=0 zkctl diagnose <device-ip> --probe-live -o report.json
 ```
 
 `--probe-live` listens for live events for 60 seconds after the table
@@ -95,7 +109,8 @@ report attached and the device model from its label. Each report becomes a
 row in [COMPATIBILITY.md](docs/COMPATIBILITY.md) and answers some of the
 open questions in [DECISIONS.md](docs/DECISIONS.md#open-questions-blocked-on-zkctl-diagnose-reports-from-hardware).
 Packet captures (`--capture DIR`) help even more; they are scrubbed too, but
-review them before attaching.
+review them before attaching. Never attach anything holding passwords,
+fingerprint templates or personal data.
 
 ## Parity table
 

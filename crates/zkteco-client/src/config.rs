@@ -20,6 +20,10 @@ pub const DEFAULT_PORT: u16 = 4370;
 /// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, each documented"
+)]
 pub struct ClientConfig {
     /// Device host name or address.
     pub host: String,
@@ -69,6 +73,14 @@ pub struct ClientConfig {
     /// read-only client can subscribe to live events (default `false`).
     /// Subscribing changes no data; it ends with the session.
     pub allow_event_subscription: bool,
+    /// Dry run (default `false`): commands outside
+    /// [`READ_ONLY_COMMANDS`] are not sent. Each is recorded
+    /// ([`Client::take_planned`](crate::Client::take_planned)) and answered
+    /// with a synthesized `CMD_ACK_OK`, so a multi-step operation runs to
+    /// the end and the record shows every packet it would have sent. Reads
+    /// are real. Steps that depend on a real answer to a write (enrolment
+    /// reports, for one) see none.
+    pub dry_run: bool,
 }
 
 /// Which transport to use.
@@ -141,6 +153,7 @@ impl ClientConfig {
             pending_event_capacity: 1024,
             tcp_keepalive: Some(Duration::from_secs(30)),
             allow_event_subscription: false,
+            dry_run: false,
         }
     }
 
@@ -155,6 +168,13 @@ impl ClientConfig {
     #[must_use]
     pub fn allow_event_subscription(mut self, enabled: bool) -> Self {
         self.allow_event_subscription = enabled;
+        self
+    }
+
+    /// Enable or disable dry-run mode.
+    #[must_use]
+    pub fn dry_run(mut self, enabled: bool) -> Self {
+        self.dry_run = enabled;
         self
     }
 
