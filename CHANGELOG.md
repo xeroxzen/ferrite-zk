@@ -7,7 +7,7 @@ crates share one version.
 
 ## [Unreleased]
 
-## [0.1.0-alpha.1]
+## [0.1.0-alpha.1] - 2026-11-15
 
 First release. **Alpha, untested on physical devices**: everything is
 tested against a mock device only.
