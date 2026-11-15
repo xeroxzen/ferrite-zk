@@ -1,5 +1,5 @@
 //! `zkctl live` in human mode: one status line per connection change, per
-//! device, instead of the client's logs.
+//! device, on standard error, instead of the client's logs.
 
 use std::time::{Duration, Instant};
 
@@ -101,12 +101,11 @@ fn reconnected(after: Duration, backfilled: u64, w: Wording) -> String {
     format!("reconnected after {after:.1} s, backfilled {backfilled} event{s}")
 }
 
-/// Whether human output is coloured: standard output is a terminal and
+/// Whether to colour what goes to `stream`: it is a terminal and
 /// `NO_COLOR` is unset or empty (<https://no-color.org>).
-pub(super) fn use_color() -> bool {
-    use std::io::IsTerminal;
+pub(super) fn use_color(stream: &impl std::io::IsTerminal) -> bool {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    !no_color && std::io::stdout().is_terminal()
+    !no_color && stream.is_terminal()
 }
 
 /// `text` dimmed, when colouring.

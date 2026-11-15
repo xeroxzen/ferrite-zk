@@ -25,7 +25,7 @@ crates share one version.
 ### zkctl
 
 - `live` in human output reports each device's connection as status lines
-  on standard output (`disconnected, reconnecting…`, `reconnected after
+  on standard error (`disconnected, reconnecting…`, `reconnected after
   6.2 s, backfilled 3 events`), in the host's local time. The client's
   logs and retry attempts need `-v`; log timestamps are local time, and
   logs are coloured only on a terminal without `NO_COLOR`. Event lines

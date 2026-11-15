@@ -1,0 +1,7 @@
+---
+source: crates/zkctl/tests/live.rs
+expression: mask_clock(&stderr)
+---
+[local time]  127.0.0.1  disconnected, reconnecting…
+[local time]  127.0.0.1  reconnected after [n] s, backfilled 2 events
+stopped after 3 events; 0 further events arrived while unsubscribing and were not emitted

@@ -78,7 +78,8 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
     });
     let mut printer = Printer {
         format: g.output,
-        color: g.output == Format::Human && live_status::use_color(),
+        color: g.output == Format::Human && live_status::use_color(&std::io::stdout()),
+        status_color: live_status::use_color(&std::io::stderr()),
         limit: args.count,
         printed: 0,
         unemitted: 0,
@@ -98,6 +99,8 @@ struct Printer<'a> {
     format: Format,
     /// Human output to a terminal, without `NO_COLOR`.
     color: bool,
+    /// Standard error is a terminal, without `NO_COLOR`.
+    status_color: bool,
     limit: Option<u64>,
     printed: u64,
     /// Events that arrived after the limit was reached.
@@ -160,10 +163,17 @@ impl Printer<'_> {
         Ok(self.limit_reached())
     }
 
-    /// A status line: the host's local time, the device, what changed.
+    /// A status line on standard error: the host's local time, the
+    /// device, what changed.
     fn status(&self, device: &str, text: &str) -> Result<()> {
+        use std::io::Write;
         let line = format!("{}  {device}  {text}", output::local_now());
-        output::text(&live_status::dim(&line, self.color))
+        writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            live_status::dim(&line, self.status_color)
+        )?;
+        Ok(())
     }
 
     /// The final save and the `--count` report. Error if the state could

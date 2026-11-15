@@ -79,33 +79,42 @@ async fn finish_text(child: Child) -> (String, i32, String) {
     (stdout, out.status.code().unwrap_or(-1), stderr)
 }
 
-/// Stderr of a human-mode run at default verbosity: at most the `--count`
-/// report, no logs or warnings.
+/// Stderr of a human-mode run at default verbosity: status lines (local
+/// time, then the device) and the `--count` report; no logs or warnings.
 fn assert_no_logs(stderr: &str) {
     for line in stderr.lines() {
+        let status = line.len() > 19
+            && line.as_bytes()[..19]
+                .iter()
+                .all(|b| b.is_ascii_digit() || b"-T:".contains(b))
+            && line[19..].starts_with("  127.0.0.1  ");
         assert!(
-            line.starts_with("stopped after "),
+            status || line.starts_with("stopped after "),
             "unexpected on stderr: {stderr}"
         );
     }
 }
 
-/// Human output with the host's clock masked: status lines start with the
-/// local time, and say how long a reconnect took.
-fn mask_clock(stdout: &str) -> String {
+/// Stderr with the host's clock masked: status lines start with the local
+/// time, and say how long a reconnect took.
+fn mask_clock(stderr: &str) -> String {
     let mut masked = String::new();
-    for l in stdout.lines() {
-        let (when, rest) = l.split_at(l.len().min(19));
-        let is_status = !rest.contains("  live  ") && !rest.contains("  backfill  ");
-        masked.push_str(if is_status { "[local time]" } else { when });
+    for l in stderr.lines() {
+        let rest = match l.get(19..) {
+            Some(rest) if rest.starts_with("  ") => {
+                masked.push_str("[local time]");
+                rest
+            }
+            _ => l,
+        };
         match rest.split_once(" after ") {
-            Some((head, tail)) => {
+            Some((head, tail)) if tail.contains(" s") => {
                 let tail = tail.split_once(" s").map_or(tail, |(_, t)| t);
                 masked.push_str(head);
                 masked.push_str(" after [n] s");
                 masked.push_str(tail);
             }
-            None => masked.push_str(rest),
+            _ => masked.push_str(rest),
         }
         masked.push('\n');
     }
@@ -596,7 +605,7 @@ async fn live_ids_fall_back_to_the_profile_name() {
 
 /// Human output shows only what is known: live events in the 12-byte
 /// layout carry a user ID but no uid, so no `(uid ?)`. Nothing from the
-/// client's logs on stderr, and no colour when stdout is not a terminal.
+/// client's logs on stderr, and no colour when not on a terminal.
 #[tokio::test]
 async fn human_output_shows_known_fields_only() {
     let dev = MockDevice::start(DeviceState::default()).await;
@@ -613,8 +622,9 @@ async fn human_output_shows_known_fields_only() {
     insta::assert_snapshot!("live_human", stdout);
 }
 
-/// A lost connection is one status line, the reconnect another, with the
-/// backfilled count; the client's own logs and retries stay off stderr.
+/// A lost connection is one status line on stderr, the reconnect another,
+/// with the backfilled count; stdout carries only events, and the
+/// client's own logs and retries stay hidden.
 #[tokio::test]
 async fn human_status_lines_across_a_reconnect() {
     let dev = MockDevice::start(DeviceState::default()).await;
@@ -635,35 +645,18 @@ async fn human_status_lines_across_a_reconnect() {
     assert_eq!(dev.count(Command::GetTime), 1, "subscribed");
     dev.drop_connection();
     dev.record_offline(2);
-    let mut lines = Vec::new();
-    // The live punch only after the backfill, or it would be backfilled
-    // too. Bounded: the status lines and two backfilled events come first.
-    for _ in 0..4 {
-        lines.push(next_text_line(&mut reader).await);
-        if lines.last().is_some_and(|l| l.contains("reconnected")) {
-            break;
-        }
-    }
+    // The live punch only after the backfill, or it would be backfilled too.
+    let mut lines = vec![
+        next_text_line(&mut reader).await,
+        next_text_line(&mut reader).await,
+    ];
     dev.push_events(1);
-    // Bounded by the timeout in `next_text_line` and by `--count`.
-    while lines.len() < 5 {
-        lines.push(next_text_line(&mut reader).await);
-    }
+    lines.push(next_text_line(&mut reader).await);
     let (_, code, stderr) = finish_text(child).await;
     assert_eq!(code, 0, "{stderr}");
     assert_no_logs(&stderr);
-    let stdout = lines.join("\n") + "\n";
-    let status: Vec<&String> = lines
-        .iter()
-        .filter(|l| !l.contains("  live  ") && !l.contains("  backfill  "))
-        .collect();
-    assert!(
-        status.iter().all(|l| l.as_bytes()[..19]
-            .iter()
-            .all(|b| b.is_ascii_digit() || b"-T:".contains(b))),
-        "status lines start with the local time: {status:?}"
-    );
-    insta::assert_snapshot!("live_human_reconnect", mask_clock(&stdout));
+    insta::assert_snapshot!("live_human_reconnect_stdout", lines.join("\n") + "\n");
+    insta::assert_snapshot!("live_human_reconnect_stderr", mask_clock(&stderr));
 }
 
 /// The next stdout line, as text.

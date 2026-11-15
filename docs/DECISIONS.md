@@ -784,10 +784,11 @@ list.
   (disconnected, reconnected with the backfilled count; the first
   connection failing and then working), and the client's logs need `-v`.
   Machine output (`ndjson`) is unchanged.
-- Status lines go to standard output, through the single printer, so they
-  stay in order with the events they explain (a reconnect line comes
-  before what it backfilled). They are human output only; `ndjson` never
-  carries them.
+- Status lines go to standard error: data on standard output, everything
+  else on standard error, so redirecting stdout keeps only events. They
+  are written by the single printer, so on a terminal they still appear
+  in order with the events they explain (a reconnect line before what it
+  backfilled). They are human output only; `ndjson` never carries them.
 - zkctl cannot tell a lost connection from other stream errors, or see a
   reconnect that backfilled nothing, from the stream alone. The client now
   says so: `CaptureStats::connected` (false from the loss until the

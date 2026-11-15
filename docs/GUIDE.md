@@ -222,8 +222,9 @@ the connection as dead, because it is not yet known whether every
 firmware answers requests while subscribed (Q6).
 
 In human output (the default), `live` reports each device's connection as
-status lines on standard output, in order with the events, stamped with the
-host's local time:
+status lines on standard error, stamped with the host's local time.
+Standard output carries only the events, so `zkctl live > punches.txt`
+keeps a clean record while the status shows on the terminal:
 
 | Line | When |
 |---|---|
@@ -234,8 +235,9 @@ host's local time:
 | `front  reconnect failed (attempt 2): …` | Each failed attempt, only with `-v` |
 
 The client's own logs (retries, reconnect attempts) appear only with `-v`;
-log timestamps are local time too. On a terminal, status lines are dimmed
-and `backfill` is coloured, unless `NO_COLOR` is set. Event lines show the
+log timestamps are local time too. Status lines are dimmed when standard
+error is a terminal, and `backfill` is coloured when standard output is,
+unless `NO_COLOR` is set. Event lines show the
 uid only when it is known. `--output ndjson` is unchanged: no status
 lines, warnings and logs on standard error as before.
 
