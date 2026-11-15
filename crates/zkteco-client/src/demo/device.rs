@@ -276,14 +276,14 @@ impl DeviceState {
 
     /// The attendance record of the latest event: user ID `events_sent`.
     pub fn last_event_record(&self) -> Attendance {
-        Attendance {
-            uid: Some(Uid(u16::try_from(self.events_sent).unwrap())),
-            user_id: Some(UserId(self.events_sent.to_string())),
-            timestamp: self.time,
-            status: attendance::AttendanceStatus::Fingerprint,
-            punch: attendance::Punch::CheckIn,
-            workcode: None,
-        }
+        let mut record = Attendance::new(
+            self.time,
+            attendance::AttendanceStatus::Fingerprint,
+            attendance::Punch::CheckIn,
+        );
+        record.uid = Some(Uid(u16::try_from(self.events_sent).unwrap()));
+        record.user_id = Some(UserId(self.events_sent.to_string()));
+        record
     }
 
     /// An `ATTLOG` event repeating the punch of user ID `n`.
@@ -616,12 +616,7 @@ impl DeviceState {
             let len = usize::from(u16::from_le_bytes([temps[off], temps[off + 1]]));
             let data = Bytes::copy_from_slice(temps.get(off + 2..off + 2 + len)?);
             self.templates.retain(|t| !(t.uid == uid && t.fid == fid));
-            self.templates.push(Template {
-                uid,
-                fid,
-                valid: 1,
-                data,
-            });
+            self.templates.push(Template::new(uid, fid, data));
         }
         Some(())
     }
@@ -676,15 +671,13 @@ impl DeviceState {
 /// Synthetic users with predictable fields.
 pub fn users(n: u16) -> Vec<User> {
     (1..=n)
-        .map(|uid| User {
-            uid: Uid(uid),
-            user_id: UserId(format!("{}", 1000 + u32::from(uid))),
-            name: format!("User {uid}"),
-            password: String::new(),
-            privilege: user::Privilege::User,
-            disabled: false,
-            card: u32::from(uid) * 7,
-            group_id: "1".into(),
+        .map(|uid| {
+            let mut user = User::new(Uid(uid), UserId(format!("{}", 1000 + u32::from(uid))));
+            user.name = format!("User {uid}");
+            user.privilege = user::Privilege::User;
+            user.card = u32::from(uid) * 7;
+            user.group_id = "1".into();
+            user
         })
         .collect()
 }
@@ -696,13 +689,15 @@ pub fn punches(n: u32) -> Vec<Attendance> {
         .and_hms_opt(8, 0, 0)
         .unwrap();
     (0..n)
-        .map(|i| Attendance {
-            uid: Some(Uid(u16::try_from(i % 50 + 1).unwrap())),
-            user_id: Some(UserId(format!("{}", 1001 + i % 50))),
-            timestamp: base + chrono::Duration::minutes(i64::from(i)),
-            status: attendance::AttendanceStatus::Fingerprint,
-            punch: attendance::Punch::CheckIn,
-            workcode: None,
+        .map(|i| {
+            let mut record = Attendance::new(
+                base + chrono::Duration::minutes(i64::from(i)),
+                attendance::AttendanceStatus::Fingerprint,
+                attendance::Punch::CheckIn,
+            );
+            record.uid = Some(Uid(u16::try_from(i % 50 + 1).unwrap()));
+            record.user_id = Some(UserId(format!("{}", 1001 + i % 50)));
+            record
         })
         .collect()
 }
@@ -710,15 +705,16 @@ pub fn punches(n: u32) -> Vec<Attendance> {
 /// Synthetic templates (pseudo-random bytes, not biometric data).
 pub fn templates(uids: &[u16], len: usize) -> Vec<Template> {
     uids.iter()
-        .map(|&uid| Template {
-            uid: Uid(uid),
-            fid: 0,
-            valid: 1,
-            data: Bytes::from(
-                (0..len)
-                    .map(|i| u8::try_from((i * 31 + usize::from(uid)) % 251).unwrap() + 1)
-                    .collect::<Vec<_>>(),
-            ),
+        .map(|&uid| {
+            Template::new(
+                Uid(uid),
+                0,
+                Bytes::from(
+                    (0..len)
+                        .map(|i| u8::try_from((i * 31 + usize::from(uid)) % 251).unwrap() + 1)
+                        .collect::<Vec<_>>(),
+                ),
+            )
         })
         .collect()
 }

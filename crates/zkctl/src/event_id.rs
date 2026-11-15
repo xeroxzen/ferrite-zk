@@ -109,17 +109,17 @@ mod tests {
     }
 
     fn punch(uid: Option<u16>, user_id: Option<&str>) -> Attendance {
-        Attendance {
-            uid: uid.map(Uid),
-            user_id: user_id.map(|s| UserId(s.into())),
-            timestamp: NaiveDate::from_ymd_opt(2026, 1, 2)
+        let mut record = Attendance::new(
+            NaiveDate::from_ymd_opt(2026, 1, 2)
                 .unwrap()
                 .and_hms_opt(3, 4, 5)
                 .unwrap(),
-            status: AttendanceStatus::Fingerprint,
-            punch: Punch::CheckIn,
-            workcode: None,
-        }
+            AttendanceStatus::Fingerprint,
+            Punch::CheckIn,
+        );
+        record.uid = uid.map(Uid);
+        record.user_id = user_id.map(|s| UserId(s.into()));
+        record
     }
 
     /// Pinned: changing the encoding changes every published `id`, which

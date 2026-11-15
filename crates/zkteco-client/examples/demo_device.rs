@@ -229,14 +229,9 @@ impl Demo {
             let state = self.device.state();
             (state.users[i].uid, state.users[i].user_id.clone())
         };
-        let record = Attendance {
-            uid: Some(uid),
-            user_id: Some(user_id),
-            timestamp,
-            status,
-            punch,
-            workcode: None,
-        };
+        let mut record = Attendance::new(timestamp, status, punch);
+        record.uid = Some(uid);
+        record.user_id = Some(user_id);
         (record, NAMES[i])
     }
 

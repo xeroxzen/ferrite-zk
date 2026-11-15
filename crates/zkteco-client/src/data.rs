@@ -217,7 +217,7 @@ impl Client {
     /// [`Error::DeviceError`] for failure replies other than `AckError`;
     /// timeout, connection, or repeated decoding errors.
     pub async fn user_template(&mut self, uid: Uid, fid: u8) -> Result<Option<Template>> {
-        let attempts = self.config.retry.attempts();
+        let attempts = self.config.retry.effective_attempts();
         let mut attempt = 1;
         loop {
             let reply_id = self
@@ -229,12 +229,7 @@ impl Client {
             {
                 Ok(data) => {
                     let data = finger::clean_single(&data)?;
-                    return Ok(Some(Template {
-                        uid,
-                        fid,
-                        valid: 1,
-                        data,
-                    }));
+                    return Ok(Some(Template::new(uid, fid, data)));
                 }
                 Err(Error::DeviceError {
                     reply: Command::AckError,

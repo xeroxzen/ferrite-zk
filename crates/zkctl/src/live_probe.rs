@@ -77,12 +77,10 @@ pub async fn run(config: ClientConfig, listen: Duration) -> LiveProbe {
         }
     };
     client.start_recording();
-    let opts = CaptureOptions {
-        prepare: false,
-        heartbeat: Some(PROBE_HEARTBEAT),
-        heartbeat_misses: u32::MAX,
-        ..CaptureOptions::default()
-    };
+    let opts = CaptureOptions::default()
+        .prepare(false)
+        .heartbeat(Some(PROBE_HEARTBEAT))
+        .heartbeat_misses(u32::MAX);
     let mut capture = match client.live_capture(opts).await {
         Ok(c) => c,
         Err(e) => {

@@ -21,11 +21,21 @@ const MAX_FINGER: u8 = 9;
 
 /// Options for [`Client::enroll_user`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnrollOptions {
     /// How long to wait for each report from the device (each scan
     /// produces some). Default: 60 seconds, as the reference
     /// implementation.
     pub report_timeout: Duration,
+}
+
+impl EnrollOptions {
+    /// Set how long to wait for each report.
+    #[must_use]
+    pub const fn report_timeout(mut self, report_timeout: Duration) -> Self {
+        self.report_timeout = report_timeout;
+        self
+    }
 }
 
 impl Default for EnrollOptions {

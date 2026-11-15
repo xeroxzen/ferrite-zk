@@ -801,6 +801,29 @@ list.
   coloured `backfill`, coloured logs) only on a terminal and without
   `NO_COLOR`.
 
+## D39. `#[non_exhaustive]` on options, stats and constructed records
+
+- Adding a field to a public struct with public fields breaks every
+  caller that builds it with a struct literal; D38 did that to
+  `CaptureStats`. While still alpha, the structs callers build are made
+  `#[non_exhaustive]` once, so later fields are not breaking.
+- zkteco-client: `CaptureOptions`, `ReconnectPolicy`, `Resume`,
+  `CaptureStats`, `RetryPolicy`, `EnrollOptions` (`ClientConfig` already
+  was). Construction is `Default` plus chained setters named after the
+  fields, the pattern `ClientConfig` set; `Option` fields take the inner
+  value (`reconnect(policy)`), except `heartbeat`, where `None` is a
+  meaningful setting. `Resume` has no sensible default, so `Resume::new`.
+- zkteco-proto: `User`, `Attendance`, `Template`, the records callers build
+  to write or to compare. Each gets `new` with the fields that identify it;
+  the rest are set by assignment. No setters: records are data, and
+  assignment reads plainly.
+- Not changed: structs the library builds and callers read
+  (`CapturedEvent`, `NetworkParams`, `DeviceFacts`), the capture and
+  diagnostic records (`Recording`, `RecordedPacket`, `StreamSample`,
+  `SampledPacket`; zkctl builds these too), the wire types (`Header`,
+  `Packet`), and the `demo` module (hidden, not API). These can follow
+  before 0.1.0 if any is expected to grow.
+
 ## Known issues
 
 - **`merges_devices_across_a_reconnect` (zkctl `tests/live.rs`) hung once.**

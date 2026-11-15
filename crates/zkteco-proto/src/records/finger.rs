@@ -16,6 +16,7 @@ pub const MAX_FINGER_INDEX: u8 = 9;
 
 /// A stored fingerprint template.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Template {
     /// Owner's device-internal index.
     pub uid: Uid,
@@ -26,6 +27,19 @@ pub struct Template {
     pub valid: u8,
     /// Opaque template data.
     pub data: Bytes,
+}
+
+impl Template {
+    /// A valid template (flag 1) for finger `fid` of user `uid`.
+    #[must_use]
+    pub const fn new(uid: Uid, fid: u8, data: Bytes) -> Self {
+        Self {
+            uid,
+            fid,
+            valid: 1,
+            data,
+        }
+    }
 }
 
 /// Decode a template table returned by a buffered read: a `u32` byte length

@@ -100,17 +100,17 @@ mod tests {
     use zkteco_proto::records::attendance::{AttendanceStatus, Punch};
 
     fn rec(id: &str, minute: u32) -> Attendance {
-        Attendance {
-            uid: Some(Uid(1)),
-            user_id: Some(UserId(id.into())),
-            timestamp: NaiveDate::from_ymd_opt(2026, 1, 1)
+        let mut record = Attendance::new(
+            NaiveDate::from_ymd_opt(2026, 1, 1)
                 .unwrap()
                 .and_hms_opt(8, minute, 0)
                 .unwrap(),
-            status: AttendanceStatus::Card,
-            punch: Punch::CheckIn,
-            workcode: None,
-        }
+            AttendanceStatus::Card,
+            Punch::CheckIn,
+        );
+        record.uid = Some(Uid(1));
+        record.user_id = Some(UserId(id.into()));
+        record
     }
 
     #[test]

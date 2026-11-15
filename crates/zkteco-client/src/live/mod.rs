@@ -31,7 +31,21 @@ pub use dedup::DEDUP_CAPACITY;
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// How [`Client::live_capture`] subscribes and keeps the subscription.
+///
+/// Start from [`Default`] and change what differs; the struct is
+/// `#[non_exhaustive]`, so a struct literal does not compile outside this
+/// crate.
+///
+/// ```
+/// use zkteco_client::{CaptureOptions, ReconnectPolicy};
+///
+/// let opts = CaptureOptions::default()
+///     .reconnect(ReconnectPolicy::default().max_attempts(u32::MAX))
+///     .backfill(true);
+/// assert!(opts.backfill);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CaptureOptions {
     /// Events to subscribe to. Default: [`EventFlags::ATTLOG`].
     pub events: EventFlags,
@@ -78,11 +92,21 @@ pub struct CaptureOptions {
 /// with a device time before `since` (after the device clock was set back)
 /// are not recovered.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Resume {
     /// The latest device time delivered.
     pub since: NaiveDateTime,
     /// The attendance records already delivered with device time `since`.
     pub delivered: Vec<Attendance>,
+}
+
+impl Resume {
+    /// Resume at `since`, skipping `delivered`, the records already
+    /// delivered with that device time.
+    #[must_use]
+    pub const fn new(since: NaiveDateTime, delivered: Vec<Attendance>) -> Self {
+        Self { since, delivered }
+    }
 }
 
 impl Default for CaptureOptions {
@@ -100,8 +124,67 @@ impl Default for CaptureOptions {
     }
 }
 
+impl CaptureOptions {
+    /// Set the events to subscribe to.
+    #[must_use]
+    pub const fn events(mut self, events: EventFlags) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// Send the preparation commands before subscribing, or not.
+    #[must_use]
+    pub const fn prepare(mut self, prepare: bool) -> Self {
+        self.prepare = prepare;
+        self
+    }
+
+    /// Fill in missing user fields from the user table, or not.
+    #[must_use]
+    pub const fn resolve_users(mut self, resolve_users: bool) -> Self {
+        self.resolve_users = resolve_users;
+        self
+    }
+
+    /// Set the heartbeat interval; `None` never checks.
+    #[must_use]
+    pub const fn heartbeat(mut self, heartbeat: Option<Duration>) -> Self {
+        self.heartbeat = heartbeat;
+        self
+    }
+
+    /// Set the unanswered heartbeats tolerated in a row.
+    #[must_use]
+    pub const fn heartbeat_misses(mut self, heartbeat_misses: u32) -> Self {
+        self.heartbeat_misses = heartbeat_misses;
+        self
+    }
+
+    /// Reconnect with `reconnect` when the connection is lost.
+    #[must_use]
+    pub const fn reconnect(mut self, reconnect: ReconnectPolicy) -> Self {
+        self.reconnect = Some(reconnect);
+        self
+    }
+
+    /// Backfill after each reconnect, or not.
+    #[must_use]
+    pub const fn backfill(mut self, backfill: bool) -> Self {
+        self.backfill = backfill;
+        self
+    }
+
+    /// Resume where an earlier capture stopped.
+    #[must_use]
+    pub fn resume(mut self, resume: Resume) -> Self {
+        self.resume = Some(resume);
+        self
+    }
+}
+
 /// How a [`LiveCapture`] reconnects after losing the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReconnectPolicy {
     /// Consecutive failed reconnects (each one a full
     /// [`Client::reconnect`] with its own retries) before the stream ends.
@@ -123,6 +206,27 @@ impl Default for ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
+    /// Set the attempts before giving up.
+    #[must_use]
+    pub const fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    /// Set the delay before the first attempt.
+    #[must_use]
+    pub const fn initial_backoff(mut self, initial_backoff: Duration) -> Self {
+        self.initial_backoff = initial_backoff;
+        self
+    }
+
+    /// Set the longest delay between attempts.
+    #[must_use]
+    pub const fn max_backoff(mut self, max_backoff: Duration) -> Self {
+        self.max_backoff = max_backoff;
+        self
+    }
+
     /// The wait before reconnect attempt `failures + 1`.
     #[must_use]
     pub fn backoff(&self, failures: u32) -> Duration {
@@ -190,6 +294,7 @@ pub(crate) fn user_id_source(
 
 /// Counters for one [`LiveCapture`], since it started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct CaptureStats {
     /// Events delivered (live and backfilled).
     pub events: u64,
@@ -437,17 +542,16 @@ mod tests {
     }
 
     fn punch(user_id: Option<&str>) -> LiveEvent {
-        LiveEvent::Attendance(Attendance {
-            uid: None,
-            user_id: user_id.map(|s| UserId(s.into())),
-            timestamp: NaiveDate::from_ymd_opt(2026, 1, 1)
+        let mut record = Attendance::new(
+            NaiveDate::from_ymd_opt(2026, 1, 1)
                 .unwrap()
                 .and_hms_opt(8, 0, 0)
                 .unwrap(),
-            status: AttendanceStatus::Fingerprint,
-            punch: Punch::CheckIn,
-            workcode: None,
-        })
+            AttendanceStatus::Fingerprint,
+            Punch::CheckIn,
+        );
+        record.user_id = user_id.map(|s| UserId(s.into()));
+        LiveEvent::Attendance(record)
     }
 
     #[test]

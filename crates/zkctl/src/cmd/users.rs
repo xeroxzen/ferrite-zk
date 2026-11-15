@@ -162,16 +162,7 @@ fn new_user(existing: &[User], user_id: UserId, uid: Option<Uid>, fields: &UserF
             .map(|(uid, _)| uid)
             .ok_or_else(|| Fail::usage("no free uid"))?,
     };
-    let mut user = User {
-        uid,
-        user_id,
-        name: String::new(),
-        password: String::new(),
-        privilege: Privilege::User,
-        disabled: false,
-        card: 0,
-        group_id: String::new(),
-    };
+    let mut user = User::new(uid, user_id);
     apply(&mut user, fields)?;
     Ok(user)
 }

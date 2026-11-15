@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 use zkteco_client::{CaptureOptions, Client, ClientConfig, Error, LiveEvent, Transport};
-use zkteco_proto::records::user::{self, Privilege, User};
+use zkteco_proto::records::user::{self, User};
 
 /// Devices usually accept one connection at a time.
 static DEVICE: Mutex<()> = Mutex::const_new(());
@@ -120,16 +120,9 @@ async fn wrong_password_is_unauthorized() {
 async fn temp_user(client: &mut Client) -> User {
     let users = client.users().await.unwrap().records;
     let (uid, user_id) = user::next_free_ids(&users).expect("a free uid");
-    User {
-        uid,
-        user_id,
-        name: TEST_NAME.into(),
-        password: String::new(),
-        privilege: Privilege::User,
-        disabled: false,
-        card: 0,
-        group_id: String::new(),
-    }
+    let mut user = User::new(uid, user_id);
+    user.name = TEST_NAME.into();
+    user
 }
 
 #[tokio::test]

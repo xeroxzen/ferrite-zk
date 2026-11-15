@@ -60,14 +60,10 @@ use zkteco_proto::records::attendance::{
 };
 use zkteco_proto::{TextEncoding, Uid};
 
-let punch = Attendance {
-    uid: Some(Uid(7)),
-    user_id: Some("1007".into()),
-    timestamp: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap().and_hms_opt(8, 59, 4).unwrap(),
-    status: AttendanceStatus::Fingerprint,
-    punch: Punch::CheckIn,
-    workcode: None,
-};
+let at = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap().and_hms_opt(8, 59, 4).unwrap();
+let mut punch = Attendance::new(at, AttendanceStatus::Fingerprint, Punch::CheckIn);
+punch.uid = Some(Uid(7));
+punch.user_id = Some("1007".into());
 let table = attendance::encode_table(&[punch.clone()], AttendanceFormat::Long40, TextEncoding::UTF8)?;
 
 let batch = attendance::decode_table(&table, 1, TextEncoding::UTF8)?;

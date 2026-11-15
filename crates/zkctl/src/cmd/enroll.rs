@@ -36,14 +36,11 @@ pub(super) async fn run(g: &Global, args: &EnrollArgs) -> Result<Exit> {
             args.finger, target.name
         );
     }
-    let opts = EnrollOptions {
+    let mut opts = EnrollOptions::default();
+    if dry_run {
         // A dry run gets no reports; do not wait for them.
-        report_timeout: if dry_run {
-            Duration::ZERO
-        } else {
-            EnrollOptions::default().report_timeout
-        },
-    };
+        opts = opts.report_timeout(Duration::ZERO);
+    }
     let format = g.output;
     let mut failed_print = None;
     let outcome = client

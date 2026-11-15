@@ -70,15 +70,15 @@ fn user_for(format: UserFormat) -> BoxedStrategy<User> {
         text(24),
     )
         .prop_map(
-            move |(uid, privilege, disabled, password, name, card, g, id, gs, ids)| User {
-                uid: Uid(uid),
-                user_id: UserId(if compact { id.to_string() } else { ids }),
-                name,
-                password,
-                privilege,
-                disabled,
-                card,
-                group_id: if compact { g.to_string() } else { gs },
+            move |(uid, privilege, disabled, password, name, card, g, id, gs, ids)| {
+                let mut user = User::new(Uid(uid), UserId(if compact { id.to_string() } else { ids }));
+                user.name = name;
+                user.password = password;
+                user.privilege = privilege;
+                user.disabled = disabled;
+                user.card = card;
+                user.group_id = if compact { g.to_string() } else { gs };
+                user
             },
         )
         .boxed()
@@ -108,14 +108,11 @@ fn attendance_for(format: AttendanceFormat) -> BoxedStrategy<Attendance> {
                 AttendanceFormat::Medium16 => (None, Some(UserId(num_id.to_string())), Some(wc)),
                 _ => (Some(Uid(uid)), Some(UserId(str_id)), None),
             };
-            Attendance {
-                uid,
-                user_id,
-                timestamp,
-                status,
-                punch,
-                workcode,
-            }
+            let mut record = Attendance::new(timestamp, status, punch);
+            record.uid = uid;
+            record.user_id = user_id;
+            record.workcode = workcode;
+            record
         })
         .boxed()
 }
@@ -251,7 +248,11 @@ proptest! {
             EventRecordFormat::Numeric12 => n32.to_string(),
             _ => s,
         };
-        let a = Attendance { uid: None, user_id: Some(UserId(id)), timestamp: t, status: st, punch: p, workcode: None };
+        let a = {
+let mut record = Attendance::new(t, st, p);
+record.user_id = Some(UserId(id));
+record
+};
         let rec = event::encode_record(&a, f, ENC).unwrap();
         let b = event::decode_attendance_payload(&rec, ENC);
         prop_assert!(b.is_clean());
@@ -262,7 +263,11 @@ proptest! {
     fn template_table_round_trip(ts in proptest::collection::vec(
         (any::<u16>(), 0u8..=9, any::<u8>(), proptest::collection::vec(any::<u8>(), 0..300)), 0..6)) {
         let ts: Vec<Template> = ts.into_iter()
-            .map(|(uid, fid, valid, data)| Template { uid: Uid(uid), fid, valid, data: Bytes::from(data) })
+            .map(|(uid, fid, valid, data)| {
+let mut template = Template::new(Uid(uid), fid, Bytes::from(data));
+template.valid = valid;
+template
+})
             .collect();
         let b = finger::decode_table(&finger::encode_table(&ts).unwrap()).unwrap();
         prop_assert!(b.is_clean());

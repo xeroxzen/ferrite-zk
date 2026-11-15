@@ -201,28 +201,22 @@ fn to_client(e: &Entry) -> Result<(User, Vec<Template>)> {
             )))
         }
     };
-    let user = User {
-        uid: Uid(u.uid),
-        user_id: UserId(u.user_id.clone()),
-        name: u.name.clone(),
-        password: u.password.clone(),
-        privilege,
-        disabled: u.disabled,
-        card: u.card,
-        group_id: u.group_id.clone(),
-    };
+    let mut user = User::new(Uid(u.uid), UserId(u.user_id.clone()));
+    user.name.clone_from(&u.name);
+    user.password.clone_from(&u.password);
+    user.privilege = privilege;
+    user.disabled = u.disabled;
+    user.card = u.card;
+    user.group_id.clone_from(&u.group_id);
     let templates = e
         .templates
         .iter()
         .map(|t| {
             let data =
                 hex::decode(&t.data_hex).with_context(|| format!("user {}: template data", u.user_id))?;
-            Ok(Template {
-                uid: Uid(u.uid),
-                fid: t.fid,
-                valid: t.valid,
-                data: data.into(),
-            })
+            let mut template = Template::new(Uid(u.uid), t.fid, data.into());
+            template.valid = t.valid;
+            Ok(template)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((user, templates))

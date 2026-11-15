@@ -27,9 +27,7 @@ fn three_scans(result: (EventFlags, Vec<u8>)) -> Vec<(EventFlags, Vec<u8>)> {
 }
 
 fn fast() -> EnrollOptions {
-    EnrollOptions {
-        report_timeout: Duration::from_millis(200),
-    }
+    EnrollOptions::default().report_timeout(Duration::from_millis(200))
 }
 
 async fn device(script: Vec<(EventFlags, Vec<u8>)>) -> MockDevice {

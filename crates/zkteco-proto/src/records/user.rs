@@ -134,6 +134,7 @@ impl Privilege {
 
 /// A user as stored on the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct User {
     /// Device-internal record index (1-based on most firmware).
     pub uid: Uid,
@@ -155,6 +156,22 @@ pub struct User {
 }
 
 impl User {
+    /// An ordinary, enabled user with no name, password, card or group;
+    /// set the public fields for the rest.
+    #[must_use]
+    pub const fn new(uid: Uid, user_id: UserId) -> Self {
+        Self {
+            uid,
+            user_id,
+            name: String::new(),
+            password: String::new(),
+            privilege: Privilege::User,
+            disabled: false,
+            card: 0,
+            group_id: String::new(),
+        }
+    }
+
     /// The name, or `NN-<user_id>` when the stored name is empty. This
     /// matches what pyzk returns as the name.
     #[must_use]

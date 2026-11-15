@@ -16,21 +16,16 @@ use zkteco_proto::{Command, TextEncoding};
 
 /// No heartbeat, so tests see only the packets they cause.
 fn quiet() -> CaptureOptions {
-    CaptureOptions {
-        heartbeat: None,
-        ..CaptureOptions::default()
-    }
+    CaptureOptions::default().heartbeat(None)
 }
 
 fn reconnecting(max_attempts: u32) -> CaptureOptions {
-    CaptureOptions {
-        reconnect: Some(ReconnectPolicy {
-            max_attempts,
-            initial_backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(40),
-        }),
-        ..quiet()
-    }
+    quiet().reconnect(
+        ReconnectPolicy::default()
+            .max_attempts(max_attempts)
+            .initial_backoff(Duration::from_millis(10))
+            .max_backoff(Duration::from_millis(40)),
+    )
 }
 
 async fn next(capture: &mut LiveCapture) -> Option<zkteco_client::Result<CapturedEvent>> {
@@ -77,11 +72,9 @@ async fn subscribes_streams_and_stops() {
 async fn options_choose_the_mask_and_skip_preparation() {
     let dev = MockDevice::start(DeviceState::default()).await;
     let client = Client::connect(dev.config()).await.unwrap();
-    let opts = CaptureOptions {
-        events: EventFlags::ATTLOG | EventFlags::VERIFY,
-        prepare: false,
-        ..quiet()
-    };
+    let opts = quiet()
+        .events(EventFlags::ATTLOG | EventFlags::VERIFY)
+        .prepare(false);
     let capture = client.live_capture(opts).await.unwrap();
     assert_eq!(dev.commands()[1..], [Command::RegEvent]);
     assert_eq!(
@@ -145,19 +138,10 @@ async fn resolves_users_when_asked() {
         ..DeviceState::default()
     })
     .await;
-    let opts = CaptureOptions {
-        resolve_users: true,
-        ..quiet()
-    };
+    let opts = quiet().resolve_users(true);
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
-    let punch = Attendance {
-        uid: None,
-        user_id: Some(UserId("1002".into())),
-        timestamp: dev.state().time,
-        status: AttendanceStatus::Fingerprint,
-        punch: Punch::CheckOut,
-        workcode: None,
-    };
+    let mut punch = Attendance::new(dev.state().time, AttendanceStatus::Fingerprint, Punch::CheckOut);
+    punch.user_id = Some(UserId("1002".into()));
     let payload = encode_record(&punch, EventRecordFormat::Numeric12, TextEncoding::UTF8).unwrap();
     let packet = event_with(EventFlags::ATTLOG, &payload);
     dev.push_packets(vec![packet]);
@@ -228,10 +212,7 @@ async fn works_as_a_stream() {
 #[tokio::test]
 async fn heartbeat_checks_an_idle_device() {
     let dev = MockDevice::start(DeviceState::default()).await;
-    let opts = CaptureOptions {
-        heartbeat: Some(Duration::from_millis(40)),
-        ..quiet()
-    };
+    let opts = quiet().heartbeat(Some(Duration::from_millis(40)));
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     assert!(tokio::time::timeout(Duration::from_millis(300), capture.next())
         .await
@@ -243,11 +224,9 @@ async fn heartbeat_checks_an_idle_device() {
 async fn unanswered_heartbeat_ends_the_stream_without_reconnect() {
     let dev = MockDevice::start(DeviceState::default()).await;
     dev.state().faults.drop_reply_once = Some(Command::GetTime);
-    let opts = CaptureOptions {
-        heartbeat: Some(Duration::from_millis(20)),
-        heartbeat_misses: 1,
-        ..quiet()
-    };
+    let opts = quiet()
+        .heartbeat(Some(Duration::from_millis(20)))
+        .heartbeat_misses(1);
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     let err = next(&mut capture).await.unwrap().unwrap_err();
     assert!(
@@ -378,10 +357,7 @@ async fn read_only_client_cannot_subscribe() {
 }
 
 fn backfilling() -> CaptureOptions {
-    CaptureOptions {
-        backfill: true,
-        ..reconnecting(3)
-    }
+    reconnecting(3).backfill(true)
 }
 
 /// Poll the stream until it yields, allowing time for reconnects.
@@ -391,14 +367,10 @@ async fn next_item(capture: &mut LiveCapture) -> zkteco_client::Result<CapturedE
 
 /// A punch by user ID `n` at device time `at`, as the mock records it.
 fn punch_by(at: chrono::NaiveDateTime, n: u16) -> Attendance {
-    Attendance {
-        uid: Some(Uid(n)),
-        user_id: Some(UserId(n.to_string())),
-        timestamp: at,
-        status: AttendanceStatus::Fingerprint,
-        punch: Punch::CheckIn,
-        workcode: None,
-    }
+    let mut record = Attendance::new(at, AttendanceStatus::Fingerprint, Punch::CheckIn);
+    record.uid = Some(Uid(n));
+    record.user_id = Some(UserId(n.to_string()));
+    record
 }
 
 #[tokio::test]
@@ -408,13 +380,7 @@ async fn resume_backfills_what_was_missed_before_going_live() {
     // stored while nothing was listening. All share one device time.
     dev.record_offline(4);
     let at = dev.state().time;
-    let opts = CaptureOptions {
-        resume: Some(Resume {
-            since: at,
-            delivered: vec![punch_by(at, 1), punch_by(at, 2)],
-        }),
-        ..backfilling()
-    };
+    let opts = backfilling().resume(Resume::new(at, vec![punch_by(at, 1), punch_by(at, 2)]));
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     dev.push_events(1);
     let mut got = Vec::new();
@@ -435,13 +401,7 @@ async fn resume_without_backfill_catches_nothing_up() {
     let dev = MockDevice::start(DeviceState::default()).await;
     dev.record_offline(2);
     let at = dev.state().time;
-    let opts = CaptureOptions {
-        resume: Some(Resume {
-            since: at,
-            delivered: Vec::new(),
-        }),
-        ..reconnecting(3)
-    };
+    let opts = reconnecting(3).resume(Resume::new(at, Vec::new()));
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     dev.push_events(1);
     assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), "3");
@@ -472,10 +432,7 @@ async fn events_carry_device_and_host_times() {
 async fn a_missed_heartbeat_is_tolerated() {
     let dev = MockDevice::start(DeviceState::default()).await;
     dev.state().faults.drop_reply_once = Some(Command::GetTime);
-    let opts = CaptureOptions {
-        heartbeat: Some(Duration::from_millis(20)),
-        ..quiet()
-    };
+    let opts = quiet().heartbeat(Some(Duration::from_millis(20)));
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     // Long enough for the missed heartbeat (500 ms timeout) and another.
     assert!(tokio::time::timeout(Duration::from_millis(800), capture.next())
@@ -495,11 +452,9 @@ async fn a_missed_heartbeat_is_tolerated() {
 async fn heartbeats_missed_in_a_row_end_the_connection() {
     let dev = MockDevice::start(DeviceState::default()).await;
     dev.state().faults.drop_replies = Some(Command::GetTime);
-    let opts = CaptureOptions {
-        heartbeat: Some(Duration::from_millis(20)),
-        heartbeat_misses: 2,
-        ..quiet()
-    };
+    let opts = quiet()
+        .heartbeat(Some(Duration::from_millis(20)))
+        .heartbeat_misses(2);
     let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
     let err = next_item(&mut capture).await.unwrap_err();
     assert!(
@@ -573,10 +528,7 @@ async fn stop_keeps_undelivered_backfill() {
 async fn read_only_client_may_subscribe_when_allowed() {
     let dev = MockDevice::start(DeviceState::default()).await;
     let config = dev.config().read_only(true).allow_event_subscription(true);
-    let opts = CaptureOptions {
-        prepare: false,
-        ..quiet()
-    };
+    let opts = quiet().prepare(false);
     let mut capture = LiveCapture::connect(config.clone(), opts).await.unwrap();
     dev.push_events(1);
     assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), "1");

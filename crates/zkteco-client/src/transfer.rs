@@ -92,7 +92,7 @@ impl Client {
     /// malformed replies per the retry policy. The chunk size is taken
     /// afresh on each attempt, so a retry after a shrink uses the new size.
     async fn read_chunk(&mut self, start: u32, remaining: u32) -> Result<Bytes> {
-        let attempts = self.config.retry.attempts();
+        let attempts = self.config.retry.effective_attempts();
         let mut attempt = 1;
         loop {
             let len = self.chunk_len().min(remaining);

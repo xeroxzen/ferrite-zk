@@ -23,11 +23,9 @@ pub async fn run(
     shutdown: impl Future<Output = ()>,
     mut on_event: impl FnMut(&CapturedEvent),
 ) -> zkteco_client::Result<()> {
-    let opts = CaptureOptions {
-        reconnect: Some(ReconnectPolicy::default()),
-        backfill: true,
-        ..CaptureOptions::default()
-    };
+    let opts = CaptureOptions::default()
+        .reconnect(ReconnectPolicy::default())
+        .backfill(true);
     let mut capture = LiveCapture::connect(config, opts).await?;
     let mut shutdown = std::pin::pin!(shutdown);
     // Ends on shutdown or when the stream gives up.

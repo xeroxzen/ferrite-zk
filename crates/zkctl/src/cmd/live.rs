@@ -277,17 +277,15 @@ fn who(user_id: Option<&str>, uid: Option<u16>) -> String {
 }
 
 fn options(args: &LiveArgs, resume: Option<Resume>) -> CaptureOptions {
-    CaptureOptions {
-        prepare: false,
-        resolve_users: args.with_users,
-        reconnect: args.reconnect.then_some(ReconnectPolicy {
-            max_attempts: u32::MAX,
-            ..ReconnectPolicy::default()
-        }),
-        backfill: args.backfill,
-        resume,
-        ..CaptureOptions::default()
+    let mut opts = CaptureOptions::default()
+        .prepare(false)
+        .resolve_users(args.with_users)
+        .backfill(args.backfill);
+    if args.reconnect {
+        opts = opts.reconnect(ReconnectPolicy::default().max_attempts(u32::MAX));
     }
+    opts.resume = resume;
+    opts
 }
 
 /// One device: connect (retrying with `--reconnect`), stream until asked to

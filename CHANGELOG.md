@@ -9,11 +9,17 @@ crates share one version.
 
 ### zkteco-client
 
+- **Breaking:** `CaptureOptions`, `ReconnectPolicy`, `Resume`,
+  `CaptureStats`, `RetryPolicy` and `EnrollOptions` are
+  `#[non_exhaustive]`, so fields can be added without a breaking release.
+  Build them from `Default` (or `Resume::new`) and chained setters named
+  after the fields, as `ClientConfig` already works:
+  `CaptureOptions::default().reconnect(ReconnectPolicy::default()).backfill(true)`.
+  Fields stay public for reading and assignment.
 - `CaptureStats::connected` and `CaptureStats::reconnect_failures`: whether
   the capture is subscribed (false from a lost connection until the
   reconnect and its backfill are done) and the failed reconnect attempts
-  since. `CaptureStats` gained fields, so code building it with a struct
-  literal needs `..Default::default()`.
+  since.
 - `demo_device` example: a stand-alone demo device on 127.0.0.1 with
   fictional users and punches, and periodic dropped connections, to try
   `zkctl` without hardware (`--port`, `--name`, `--interval`,
@@ -21,6 +27,13 @@ crates share one version.
 - The mock device moved from `tests/support` into the crate as
   `zkteco_client::demo`, behind the `demo` feature: off by default, hidden
   from the documentation, not part of the API.
+
+### zkteco-proto
+
+- **Breaking:** `User`, `Attendance` and `Template` are
+  `#[non_exhaustive]`. Build them with `User::new(uid, user_id)`,
+  `Attendance::new(timestamp, status, punch)` and
+  `Template::new(uid, fid, data)`, then set the other public fields.
 
 ### zkctl
 

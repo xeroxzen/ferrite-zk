@@ -541,16 +541,13 @@ async fn save_user_templates_uploads_in_1k_packets() {
 // ---- users ---------------------------------------------------------------
 
 fn new_user(uid: u16) -> User {
-    User {
-        uid: Uid(uid),
-        user_id: "4242".into(),
-        name: "Synthetic".into(),
-        password: "12".into(),
-        privilege: Privilege::Admin,
-        disabled: false,
-        card: 99,
-        group_id: "1".into(),
-    }
+    let mut user = User::new(Uid(uid), "4242".into());
+    user.name = "Synthetic".into();
+    user.password = "12".into();
+    user.privilege = Privilege::Admin;
+    user.card = 99;
+    user.group_id = "1".into();
+    user
 }
 
 #[tokio::test]

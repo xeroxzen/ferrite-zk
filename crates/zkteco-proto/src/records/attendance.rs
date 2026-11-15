@@ -178,6 +178,7 @@ impl Punch {
 
 /// One attendance record, from the log or from a real-time event.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Attendance {
     /// Device-internal user index, when the layout carries it.
     pub uid: Option<Uid>,
@@ -192,6 +193,22 @@ pub struct Attendance {
     pub punch: Punch,
     /// Work code, in the 16-byte layout.
     pub workcode: Option<u32>,
+}
+
+impl Attendance {
+    /// A record without `uid`, `user_id` or work code; set the public
+    /// fields for those.
+    #[must_use]
+    pub const fn new(timestamp: NaiveDateTime, status: AttendanceStatus, punch: Punch) -> Self {
+        Self {
+            uid: None,
+            user_id: None,
+            timestamp,
+            status,
+            punch,
+            workcode: None,
+        }
+    }
 }
 
 /// A batch of attendance records with per-record rejections.

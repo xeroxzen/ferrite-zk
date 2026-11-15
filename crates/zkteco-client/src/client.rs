@@ -80,7 +80,7 @@ impl Client {
         if config.pre_check {
             probe(&config).await?;
         }
-        let attempts = config.retry.attempts();
+        let attempts = config.retry.effective_attempts();
         let mut attempt = 1;
         loop {
             match Self::connect_once(config.clone()).await {

@@ -132,16 +132,14 @@ fn user_tables() {
 
 fn user_from(e: &Value) -> User {
     let p: u8 = num(&e["privilege"]);
-    User {
-        uid: Uid(num(&e["uid"])),
-        user_id: s(&e["user_id"]).into(),
-        name: s(&e["name"]).into(),
-        password: s(&e["password"]).into(),
-        privilege: Privilege::from_byte(p),
-        disabled: p & 1 == 1,
-        card: num(&e["card"]),
-        group_id: s(&e["group_id"]).into(),
-    }
+    let mut user = User::new(Uid(num(&e["uid"])), s(&e["user_id"]).into());
+    user.name = s(&e["name"]).into();
+    user.password = s(&e["password"]).into();
+    user.privilege = Privilege::from_byte(p);
+    user.disabled = p & 1 == 1;
+    user.card = num(&e["card"]);
+    user.group_id = s(&e["group_id"]).into();
+    user
 }
 
 fn user_format(c: &Value) -> UserFormat {
@@ -250,12 +248,7 @@ fn bulk_save() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|t| Template {
-                        uid: u.uid,
-                        fid: num(&t["fid"]),
-                        valid: 1,
-                        data: Bytes::from(hexv(&t["data"])),
-                    })
+                    .map(|t| Template::new(u.uid, num(&t["fid"]), Bytes::from(hexv(&t["data"]))))
                     .collect();
                 (u, ts)
             })

@@ -284,6 +284,7 @@ impl ClientConfig {
 /// apply after a timeout: that closes the connection (see
 /// [`Error::Timeout`](crate::Error::Timeout)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Total attempts, at least 1 (default 3, as in pyzk).
     pub attempts: u32,
@@ -307,7 +308,21 @@ impl RetryPolicy {
         backoff: Duration::ZERO,
     };
 
-    pub(crate) fn attempts(self) -> u32 {
+    /// Set the total attempts, at least 1.
+    #[must_use]
+    pub const fn attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts;
+        self
+    }
+
+    /// Set the delay before each retry.
+    #[must_use]
+    pub const fn backoff(mut self, backoff: Duration) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    pub(crate) fn effective_attempts(self) -> u32 {
         self.attempts.max(1)
     }
 }

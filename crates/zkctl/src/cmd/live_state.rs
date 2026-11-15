@@ -60,14 +60,14 @@ impl Delivered {
     }
 
     fn at(&self, timestamp: NaiveDateTime) -> Attendance {
-        Attendance {
-            uid: self.uid.map(Uid),
-            user_id: self.user_id.clone().map(UserId),
+        let mut record = Attendance::new(
             timestamp,
-            status: AttendanceStatus::from_byte(self.status_code),
-            punch: Punch::from_byte(self.punch_code),
-            workcode: None,
-        }
+            AttendanceStatus::from_byte(self.status_code),
+            Punch::from_byte(self.punch_code),
+        );
+        record.uid = self.uid.map(Uid);
+        record.user_id = self.user_id.clone().map(UserId);
+        record
     }
 }
 
@@ -114,10 +114,10 @@ impl LiveState {
     /// Where `device`'s previous run stopped, if it emitted anything.
     pub(super) fn resume(&self, device: &str) -> Option<Resume> {
         let mark = self.devices.get(device)?;
-        Some(Resume {
-            since: mark.device_time,
-            delivered: mark.delivered.iter().map(|d| d.at(mark.device_time)).collect(),
-        })
+        Some(Resume::new(
+            mark.device_time,
+            mark.delivered.iter().map(|d| d.at(mark.device_time)).collect(),
+        ))
     }
 
     /// Note that `a` was emitted for `device`. `true` if the state changed.
@@ -165,17 +165,17 @@ mod tests {
     use chrono::NaiveDate;
 
     fn punch(user: u16, second: u32) -> Attendance {
-        Attendance {
-            uid: Some(Uid(user)),
-            user_id: Some(UserId(user.to_string())),
-            timestamp: NaiveDate::from_ymd_opt(2026, 1, 1)
+        let mut record = Attendance::new(
+            NaiveDate::from_ymd_opt(2026, 1, 1)
                 .unwrap()
                 .and_hms_opt(8, 0, second)
                 .unwrap(),
-            status: AttendanceStatus::Fingerprint,
-            punch: Punch::CheckIn,
-            workcode: None,
-        }
+            AttendanceStatus::Fingerprint,
+            Punch::CheckIn,
+        );
+        record.uid = Some(Uid(user));
+        record.user_id = Some(UserId(user.to_string()));
+        record
     }
 
     #[test]

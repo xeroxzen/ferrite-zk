@@ -69,17 +69,17 @@ mod tests {
     use zkteco_proto::{Uid, UserId};
 
     fn punch(user_id: Option<&str>, uid: Option<u16>, minute: u32) -> Attendance {
-        Attendance {
-            uid: uid.map(Uid),
-            user_id: user_id.map(|s| UserId(s.into())),
-            timestamp: NaiveDate::from_ymd_opt(2026, 1, 1)
+        let mut record = Attendance::new(
+            NaiveDate::from_ymd_opt(2026, 1, 1)
                 .unwrap()
                 .and_hms_opt(8, minute, 0)
                 .unwrap(),
-            status: AttendanceStatus::Fingerprint,
-            punch: Punch::CheckIn,
-            workcode: None,
-        }
+            AttendanceStatus::Fingerprint,
+            Punch::CheckIn,
+        );
+        record.uid = uid.map(Uid);
+        record.user_id = user_id.map(|s| UserId(s.into()));
+        record
     }
 
     #[test]

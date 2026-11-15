@@ -41,11 +41,9 @@ async fn device(
     events: mpsc::Sender<(String, CapturedEvent)>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let opts = CaptureOptions {
-        reconnect: Some(ReconnectPolicy::default()),
-        backfill: true,
-        ..CaptureOptions::default()
-    };
+    let opts = CaptureOptions::default()
+        .reconnect(ReconnectPolicy::default())
+        .backfill(true);
     let mut capture = match LiveCapture::connect(config, opts).await {
         Ok(c) => c,
         Err(e) => {

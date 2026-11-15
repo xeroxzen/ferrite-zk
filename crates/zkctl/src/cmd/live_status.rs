@@ -138,12 +138,11 @@ mod tests {
     };
 
     fn stats(connected: bool, backfilled: u64, reconnect_failures: u32) -> CaptureStats {
-        CaptureStats {
-            connected,
-            backfilled,
-            reconnect_failures,
-            ..CaptureStats::default()
-        }
+        let mut stats = CaptureStats::default();
+        stats.connected = connected;
+        stats.backfilled = backfilled;
+        stats.reconnect_failures = reconnect_failures;
+        stats
     }
 
     #[test]

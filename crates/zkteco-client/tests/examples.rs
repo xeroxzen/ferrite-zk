@@ -153,15 +153,14 @@ fn demo_options(drop_every: Option<Duration>) -> demo_device::Options {
 /// Subscribe to `demo`, with fast reconnects, and return the first event
 /// that `wanted` accepts, within 10 seconds.
 async fn demo_event(demo: demo_device::Demo, wanted: impl Fn(&CapturedEvent) -> bool) -> CapturedEvent {
-    let opts = CaptureOptions {
-        reconnect: Some(ReconnectPolicy {
-            max_attempts: u32::MAX,
-            initial_backoff: Duration::from_millis(50),
-            max_backoff: Duration::from_millis(200),
-        }),
-        backfill: true,
-        ..CaptureOptions::default()
-    };
+    let opts = CaptureOptions::default()
+        .reconnect(
+            ReconnectPolicy::default()
+                .max_attempts(u32::MAX)
+                .initial_backoff(Duration::from_millis(50))
+                .max_backoff(Duration::from_millis(200)),
+        )
+        .backfill(true);
     let mut capture = LiveCapture::connect(demo.config(), opts).await.unwrap();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let stop = async {
