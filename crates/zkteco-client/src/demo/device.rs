@@ -149,6 +149,9 @@ pub struct DeviceState {
     pub offline: bool,
     /// Close the connection the next time the outbox is delivered.
     pub close_pushed: bool,
+    /// What the TCP server did and when: connections accepted and ended,
+    /// requests, pushed packets. For diagnosing timing in tests.
+    pub trace: Vec<(std::time::Instant, String)>,
     /// Protocol state of the current exchange, internal to the mock.
     pub session: Session,
 }
@@ -198,6 +201,7 @@ impl Default for DeviceState {
             uploaded: None,
             saved_bulk: Vec::new(),
             corrupt_attendance: Vec::new(),
+            trace: Vec::new(),
             event_masks: Vec::new(),
             enroll_script: Vec::new(),
             enroll_requests: Vec::new(),
@@ -219,6 +223,10 @@ pub struct Outcome {
 }
 
 impl DeviceState {
+    pub fn note(&mut self, what: String) {
+        self.trace.push((std::time::Instant::now(), what));
+    }
+
     pub fn handle(&mut self, request: &Packet) -> Outcome {
         self.log.push(request.clone());
         let cmd = request.header.command;

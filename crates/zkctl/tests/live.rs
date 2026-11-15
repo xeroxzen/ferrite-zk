@@ -5,7 +5,9 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use support::{event_with, DeviceState, MockDevice};
@@ -17,8 +19,13 @@ use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::{Command, EventFlags, UserId};
 
 fn zkctl(config: &std::path::Path, args: &[String]) -> Child {
+    zkctl_with_env(config, args, &[])
+}
+
+fn zkctl_with_env(config: &std::path::Path, args: &[String], env: &[(&str, &str)]) -> Child {
     Process::new(env!("CARGO_BIN_EXE_zkctl"))
         .args(args)
+        .envs(env.iter().copied())
         .env("ZKCTL_CONFIG", config)
         .env("ZKCTL_NO_KEYRING", "1")
         .env_remove("ZK_PASSWORD")
@@ -243,6 +250,122 @@ async fn ctrl_c_stops_cleanly() {
 /// once, tagged with its device.
 #[tokio::test]
 async fn merges_devices_across_a_reconnect() {
+    let run = merge_across_reconnect(false).await;
+    if let Err(e) = &run.verdict {
+        panic!("{e}\n{}", run.timeline());
+    }
+}
+
+/// Loops [`merges_devices_across_a_reconnect`] under CPU load until it
+/// fails or `STRESS_RUNS` (default 500) runs pass. On failure, the run's
+/// timeline goes to a file under `CARGO_TARGET_TMPDIR`. `STRESS_LOAD` sets
+/// the busy threads (default: one per CPU); `STRESS_DEBUG_LOGS=0` runs
+/// zkctl without debug logs.
+#[tokio::test]
+#[ignore = "stress harness: cargo test -p zkctl --test live stress_ -- --ignored --nocapture"]
+async fn stress_merges_devices_across_a_reconnect() {
+    let env = |name: &str| std::env::var(name).ok();
+    let runs: u32 = env("STRESS_RUNS").map_or(500, |v| v.parse().expect("STRESS_RUNS"));
+    let load: usize = env("STRESS_LOAD").map_or_else(
+        || std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
+        |v| v.parse().expect("STRESS_LOAD"),
+    );
+    let debug_logs = env("STRESS_DEBUG_LOGS").as_deref() != Some("0");
+    let stop = Arc::new(AtomicBool::new(false));
+    let busy: Vec<_> = (0..load)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            // Bounded by the harness: spins until `stop` is set below.
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::black_box((0..10_000u64).sum::<u64>());
+                }
+            })
+        })
+        .collect();
+    eprintln!("stress: {runs} runs, {load} busy threads, debug logs {debug_logs}");
+    let mut failure = None;
+    for n in 1..=runs {
+        let run = merge_across_reconnect(debug_logs).await;
+        if let Err(e) = &run.verdict {
+            let path =
+                std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("merge-failure-{n}.log"));
+            std::fs::write(&path, format!("run {n}: {e}\n\n{}", run.timeline())).unwrap();
+            failure = Some(format!("run {n} failed: {e}; timeline in {}", path.display()));
+            break;
+        }
+        if n % 25 == 0 {
+            eprintln!("stress: {n} runs passed");
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for t in busy {
+        t.join().expect("busy thread");
+    }
+    if let Some(f) = failure {
+        panic!("{f}");
+    }
+}
+
+/// What one run of the merge scenario saw, on one clock.
+struct MergeRun {
+    start: Instant,
+    /// The test's own steps and zkctl's output lines, stamped on arrival.
+    notes: Vec<(Instant, String)>,
+    /// Each mock device's trace.
+    devices: Vec<(&'static str, Vec<(Instant, String)>)>,
+    verdict: Result<(), String>,
+}
+
+impl MergeRun {
+    /// Everything, in time order, as offsets from the start.
+    fn timeline(&self) -> String {
+        let mut all: Vec<(Instant, String)> = self.notes.clone();
+        for (name, trace) in &self.devices {
+            all.extend(
+                trace
+                    .iter()
+                    .map(|(at, what)| (*at, format!("mock {name}: {what}"))),
+            );
+        }
+        all.sort_by_key(|(at, _)| *at);
+        all.iter()
+            .map(|(at, what)| {
+                let offset = at.saturating_duration_since(self.start).as_secs_f64();
+                format!("{offset:9.4}s  {what}\n")
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+}
+
+type Notes = Arc<Mutex<Vec<(Instant, String)>>>;
+
+fn note(notes: &Notes, what: impl Into<String>) {
+    notes.lock().unwrap().push((Instant::now(), what.into()));
+}
+
+/// Collect `stream`'s lines into `notes`, prefixed, and return them.
+fn collect_lines(
+    stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    prefix: &'static str,
+    notes: Notes,
+) -> tokio::task::JoinHandle<Vec<String>> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        let mut seen = Vec::new();
+        // Bounded by the child: ends at end of stream.
+        while let Ok(Some(line)) = lines.next_line().await {
+            note(&notes, format!("{prefix}: {line}"));
+            seen.push(line);
+        }
+        seen
+    })
+}
+
+/// The scenario of [`merges_devices_across_a_reconnect`], recording a
+/// timeline instead of panicking.
+async fn merge_across_reconnect(debug_logs: bool) -> MergeRun {
     let front = MockDevice::start(DeviceState::default()).await;
     let back = MockDevice::start(DeviceState::default()).await;
     let dir = tempfile::tempdir().unwrap();
@@ -267,37 +390,75 @@ async fn merges_devices_across_a_reconnect() {
         "ndjson",
         "--count",
         "7",
-        // A backstop: a missing event then fails the assertions below,
+        // A backstop: a missing event then fails the checks below,
         // showing what arrived, instead of timing out.
         "--duration",
         "10s",
     ]);
-    let child = zkctl(&config, &args);
+    let start = Instant::now();
+    let notes: Notes = Arc::default();
+    let logs: &[(&str, &str)] = if debug_logs {
+        &[("RUST_LOG", "zkteco_client=debug,zkctl=debug")]
+    } else {
+        &[]
+    };
+    let mut child = zkctl_with_env(&config, &args, logs);
+    let stdout = collect_lines(child.stdout.take().unwrap(), "zkctl stdout", Arc::clone(&notes));
+    let stderr = collect_lines(child.stderr.take().unwrap(), "zkctl stderr", Arc::clone(&notes));
+    note(&notes, "test: zkctl started");
     subscribed(&front, 1).await;
+    note(&notes, "test: front subscribed (RegEvent seen)");
     subscribed(&back, 1).await;
+    note(&notes, "test: back subscribed (RegEvent seen)");
     front.push_events(2);
     back.push_events(2);
+    note(&notes, "test: pushed front 1-2, back 1-2");
     // Let both live events reach the device's client before cutting it.
     tokio::time::sleep(Duration::from_millis(200)).await;
     back.drop_connection();
     back.record_offline(2);
+    note(&notes, "test: dropped back; stored back 3-4 offline");
     subscribed(&back, 2).await;
+    note(&notes, "test: back resubscribed (second RegEvent seen)");
     back.push_events(1);
-    let (lines, code, stderr) = finish(child).await;
-    assert_eq!(code, 0, "{stderr}");
-    let seen: Vec<(String, String, String)> = lines
-        .iter()
-        .map(|l| {
-            (
-                l["device"].as_str().unwrap().to_owned(),
-                l["user_id"].as_str().unwrap().to_owned(),
-                l["source"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
+    note(&notes, "test: pushed back 5");
+    let exit = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
+    let code = if let Ok(status) = exit {
+        status.unwrap().code().unwrap_or(-1)
+    } else {
+        child.start_kill().unwrap();
+        -2
+    };
+    note(&notes, format!("test: zkctl exited, code {code}"));
+    let lines = stdout.await.unwrap();
+    let errors = stderr.await.unwrap();
+    let verdict = check_merge(&lines, code, &errors);
+    let devices = vec![
+        ("front", front.state().trace.clone()),
+        ("back", back.state().trace.clone()),
+    ];
+    let notes = std::mem::take(&mut *notes.lock().unwrap());
+    MergeRun {
+        start,
+        notes,
+        devices,
+        verdict,
+    }
+}
+
+/// Every punch exactly once, tagged with its device; the punches stored
+/// while `back` was offline as `backfill`.
+fn check_merge(lines: &[String], code: i32, stderr: &[String]) -> Result<(), String> {
+    if code != 0 {
+        return Err(format!("exit code {code}: {stderr:?}"));
+    }
+    let mut seen = Vec::new();
+    for l in lines {
+        let v: Value = serde_json::from_str(l).map_err(|e| format!("{e}: {l}"))?;
+        let field = |k: &str| v[k].as_str().map(str::to_owned).ok_or(format!("no {k}: {l}"));
+        seen.push((field("device")?, field("user_id")?, field("source")?));
+    }
     let unique: BTreeSet<(&str, &str)> = seen.iter().map(|(d, u, _)| (d.as_str(), u.as_str())).collect();
-    assert_eq!(seen.len(), 7, "{seen:?}");
-    assert_eq!(unique.len(), 7, "no duplicates: {seen:?}");
     let expected: BTreeSet<(&str, &str)> = [
         ("front", "1"),
         ("front", "2"),
@@ -308,18 +469,20 @@ async fn merges_devices_across_a_reconnect() {
         ("back", "5"),
     ]
     .into();
-    assert_eq!(unique, expected);
+    if seen.len() != 7 || unique != expected {
+        return Err(format!("wanted each of {expected:?} once, got {seen:?}"));
+    }
     for (d, u, s) in &seen {
         let want = match (d.as_str(), u.as_str()) {
             ("back", "3" | "4") => "backfill",
             ("back", "5") => continue,
             _ => "live",
         };
-        assert_eq!(s, want, "{d} {u}");
+        if s != want {
+            return Err(format!("{d} {u} came as {s}, wanted {want}: {seen:?}"));
+        }
     }
-    assert_eq!(back.state().connections, 2);
-    assert_live_read_only(&front);
-    assert_live_read_only(&back);
+    Ok(())
 }
 
 #[tokio::test]

@@ -97,11 +97,14 @@ impl MockDevice {
                 };
                 let mut st = shared.lock().unwrap();
                 if st.offline {
+                    st.note("accepted and closed: offline".into());
                     continue; // dropping the stream closes it
                 }
                 st.connections += 1;
+                let id = st.connections;
+                st.note(format!("conn {id}: accepted"));
                 drop(st);
-                tokio::spawn(serve(stream, Arc::clone(&shared), tcp_watcher.clone()));
+                tokio::spawn(serve(stream, id, Arc::clone(&shared), tcp_watcher.clone()));
             }
         });
         let udp_addr = udp.local_addr().expect("udp local addr");
@@ -241,7 +244,23 @@ fn take_outbox(state: &Mutex<DeviceState>) -> (Vec<Vec<u8>>, bool) {
     )
 }
 
-async fn serve(mut stream: TcpStream, state: Arc<Mutex<DeviceState>>, mut pushed: watch::Receiver<u64>) {
+async fn serve(
+    mut stream: TcpStream,
+    id: usize,
+    state: Arc<Mutex<DeviceState>>,
+    pushed: watch::Receiver<u64>,
+) {
+    let why = serve_until_closed(&mut stream, id, &state, pushed).await;
+    state.lock().unwrap().note(format!("conn {id}: ended: {why}"));
+}
+
+/// Serve one connection; returns why it ended.
+async fn serve_until_closed(
+    stream: &mut TcpStream,
+    id: usize,
+    state: &Mutex<DeviceState>,
+    mut pushed: watch::Receiver<u64>,
+) -> &'static str {
     stream.set_nodelay(true).expect("nodelay");
     let mut frames = TcpFrameDecoder::default();
     let mut buf = vec![0u8; 4096];
@@ -252,34 +271,44 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<DeviceState>>, mut pushed
             read = stream.read(&mut buf) => read,
             changed = pushed.changed() => {
                 if changed.is_err() {
-                    return;
+                    return "device stopped";
                 }
                 if state.lock().unwrap().offline {
-                    return;
+                    return "offline";
                 }
-                let (packets, close) = take_outbox(&state);
-                let delivery = state.lock().unwrap().faults.delivery;
-                if write_replies(&mut stream, &packets, delivery).await.is_err() || close {
-                    return;
+                let (packets, close) = take_outbox(state);
+                let delivery = {
+                    let mut st = state.lock().unwrap();
+                    st.note(format!("conn {id}: woken: pushing {} packets, close {close}", packets.len()));
+                    st.faults.delivery
+                };
+                if write_replies(stream, &packets, delivery).await.is_err() {
+                    return "write failed";
+                }
+                if close {
+                    return "closed by the device";
                 }
                 continue;
             }
         };
         let n = match read {
-            Ok(0) | Err(_) => return,
+            Ok(0) => return "closed by the client",
+            Err(_) => return "read failed",
             Ok(n) => n,
         };
         frames.extend(&buf[..n]);
         while let Some(raw) = frames.next_packet().expect("client frames are valid") {
             let request = packet::decode(raw, ChecksumPolicy::Reject).expect("client checksums are valid");
-            let outcome = state.lock().unwrap().handle(&request);
-            let delivery = state.lock().unwrap().faults.delivery;
-            if write_replies(&mut stream, &outcome.replies, delivery)
-                .await
-                .is_err()
-                || outcome.close
-            {
-                return;
+            let (outcome, delivery) = {
+                let mut st = state.lock().unwrap();
+                st.note(format!("conn {id}: request {:?}", request.header.command));
+                (st.handle(&request), st.faults.delivery)
+            };
+            if write_replies(stream, &outcome.replies, delivery).await.is_err() {
+                return "write failed";
+            }
+            if outcome.close {
+                return "closed after a reply";
             }
         }
     }

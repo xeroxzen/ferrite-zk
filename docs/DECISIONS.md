@@ -826,23 +826,21 @@ list.
 
 ## Known issues
 
-- **`merges_devices_across_a_reconnect` (zkctl `tests/live.rs`) hung once.**
-  On 2026-11-15, during phase 6 review work, it failed one of 12
-  consecutive runs of the live test suite: the second device's events
-  never all arrived, and the test hit its 20 s wait. It then passed 25
-  runs alone, 30 runs of the live suite, 30 runs of the whole zkctl suite,
-  and 15 runs of the live suite with eight CPU-bound processes running
-  (100 runs, no failure; it also passed 5 of 5 in phase 5). Hypothesis,
-  unconfirmed: under load, a reply timeout (the test profile uses 500 ms)
-  during the reconnect or the backfill read fails an attempt, and the
-  reconnect backoff (1 s, doubling) pushes completion past 20 s. The
-  test now passes `--duration 10s`, so a recurrence ends with the events
-  received and fails on the assertions showing which are missing. Not
-  fixed; to be revisited if it recurs.
-  Recurred once on 2026-11-16 (D38 work), with events missing at the
-  `--duration` backstop, while three cargo builds and test runs shared
-  the machine; it then passed 30 consecutive runs of the live suite.
-  Consistent with the load hypothesis; still not fixed.
+- **Backfill fails if a punch lands between the size query and the table
+  read** (found through `merges_devices_across_a_reconnect`, zkctl
+  `tests/live.rs`, which failed about 1 run in 100 under load). The client
+  reads the record count (`GetFreeSizes`), then the attendance table, and
+  infers the record layout from table length / count. A punch stored in
+  between makes the table one record longer than the count: 5 x 40 bytes
+  over a count of 4 gives "50-byte records", and the read fails with
+  `UnsupportedRecordFormat`. After a reconnect, the capture reports the
+  backfill error once and carries on live, so the records stored while
+  disconnected are not delivered until the next reconnect. The same race
+  affects `attendance pull`. The earlier hypothesis (reply timeouts under
+  load) was wrong. Reproduced with the ignored stress test
+  `stress_merges_devices_across_a_reconnect`, which writes a timeline of
+  the test's steps, zkctl's debug log and the mock's requests on failure.
+  Not yet fixed.
 
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 
