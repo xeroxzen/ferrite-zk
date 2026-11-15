@@ -271,11 +271,13 @@ async fn unanswered_heartbeat_ends_the_stream_without_reconnect() {
 async fn reconnects_and_resubscribes() {
     let dev = MockDevice::start(DeviceState::default()).await;
     let mut capture = LiveCapture::connect(dev.config(), reconnecting(3)).await.unwrap();
+    assert!(capture.stats().connected);
     dev.drop_connection();
     assert!(
         next(&mut capture).await.unwrap().is_err(),
         "the lost connection is reported"
     );
+    assert!(!capture.stats().connected, "known lost when reported");
     // The reconnect happens while the stream is polled.
     let mut pushed = false;
     let mut event = None;
@@ -290,6 +292,11 @@ async fn reconnects_and_resubscribes() {
         }
     }
     assert_eq!(user_id(&event.unwrap().unwrap()), "1");
+    let stats = capture.stats();
+    assert_eq!(
+        (stats.connected, stats.reconnects, stats.reconnect_failures),
+        (true, 1, 0)
+    );
     assert_eq!(dev.state().connections, 2);
     assert_eq!(dev.count(Command::CancelCapture), 2, "preparation repeated");
 }
@@ -301,16 +308,20 @@ async fn gives_up_after_the_reconnect_limit() {
     dev.state().faults.close_on = Some(Command::Connect);
     dev.drop_connection();
     let mut errors = 0;
+    let mut failures = Vec::new();
     for _ in 0..10 {
         match next(&mut capture).await {
             Some(item) => {
                 item.unwrap_err();
                 errors += 1;
+                failures.push(capture.stats().reconnect_failures);
             }
             None => break,
         }
     }
     assert_eq!(errors, 3, "the lost connection, then two failed reconnects");
+    assert_eq!(failures, [0, 1, 2], "counted per failed attempt");
+    assert!(!capture.stats().connected);
     assert!(next(&mut capture).await.is_none(), "stays ended");
 }
 
@@ -520,6 +531,12 @@ async fn reconnect_backfills_missed_punches_once() {
     for id in ["3", "4"] {
         let e = next_item(&mut capture).await.unwrap();
         assert_eq!((user_id(&e), e.source), (id.to_string(), Source::Backfill));
+        let stats = capture.stats();
+        assert_eq!(
+            (stats.connected, stats.backfilled),
+            (true, 2),
+            "connected only once the whole backfill is counted"
+        );
     }
     // The device repeats punch 4 live (as if its acknowledgement was lost),
     // then sends a new one.

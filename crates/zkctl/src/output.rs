@@ -17,7 +17,17 @@ use crate::cli::Format;
 /// Device-local time: `YYYY-MM-DDTHH:MM:SS`, no zone.
 #[must_use]
 pub fn device_time(t: NaiveDateTime) -> String {
-    t.format("%Y-%m-%dT%H:%M:%S").to_string()
+    t.format(HUMAN_TIME).to_string()
+}
+
+/// How human-mode times are written: device time, and the host's local
+/// time in status lines and logs.
+pub const HUMAN_TIME: &str = "%Y-%m-%dT%H:%M:%S";
+
+/// The host's local time now, as [`HUMAN_TIME`].
+#[must_use]
+pub fn local_now() -> String {
+    chrono::Local::now().format(HUMAN_TIME).to_string()
 }
 
 /// Host time: RFC 3339 in UTC with milliseconds.

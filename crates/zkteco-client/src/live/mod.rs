@@ -6,7 +6,7 @@ mod dedup;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
@@ -205,6 +205,14 @@ pub struct CaptureStats {
     pub heartbeats_answered: u64,
     /// Heartbeats not answered within the request timeout.
     pub heartbeats_missed: u64,
+    /// Subscribed and listening. False from the moment the connection is
+    /// found lost until a reconnect has resubscribed and, with
+    /// [`CaptureOptions::backfill`], finished its backfill (so
+    /// [`backfilled`](Self::backfilled) already counts it).
+    pub connected: bool,
+    /// Failed reconnect attempts since the connection was lost; 0 once
+    /// reconnected.
+    pub reconnect_failures: u32,
 }
 
 #[derive(Debug, Default)]
@@ -216,6 +224,8 @@ struct Counters {
     heartbeats_sent: AtomicU64,
     heartbeats_answered: AtomicU64,
     heartbeats_missed: AtomicU64,
+    connected: AtomicBool,
+    reconnect_failures: AtomicU32,
 }
 
 type StepFuture = Pin<Box<dyn Future<Output = (Box<Capture>, Step)> + Send>>;
@@ -289,6 +299,7 @@ impl Client {
         let mut capture = Capture::new(self, opts, Arc::clone(&counters));
         capture.subscribe().await?;
         capture.resume().await?;
+        counters.connected.store(true, Ordering::Relaxed);
         Ok(LiveCapture {
             state: State::Ready(Box::new(capture)),
             counters,
@@ -326,6 +337,8 @@ impl LiveCapture {
             heartbeats_sent: get(&c.heartbeats_sent),
             heartbeats_answered: get(&c.heartbeats_answered),
             heartbeats_missed: get(&c.heartbeats_missed),
+            connected: c.connected.load(Ordering::Relaxed),
+            reconnect_failures: c.reconnect_failures.load(Ordering::Relaxed),
         }
     }
 

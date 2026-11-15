@@ -9,6 +9,11 @@ crates share one version.
 
 ### zkteco-client
 
+- `CaptureStats::connected` and `CaptureStats::reconnect_failures`: whether
+  the capture is subscribed (false from a lost connection until the
+  reconnect and its backfill are done) and the failed reconnect attempts
+  since. `CaptureStats` gained fields, so code building it with a struct
+  literal needs `..Default::default()`.
 - `demo_device` example: a stand-alone demo device on 127.0.0.1 with
   fictional users and punches, and periodic dropped connections, to try
   `zkctl` without hardware (`--port`, `--name`, `--interval`,
@@ -16,6 +21,16 @@ crates share one version.
 - The mock device moved from `tests/support` into the crate as
   `zkteco_client::demo`, behind the `demo` feature: off by default, hidden
   from the documentation, not part of the API.
+
+### zkctl
+
+- `live` in human output reports each device's connection as status lines
+  on standard output (`disconnected, reconnecting…`, `reconnected after
+  6.2 s, backfilled 3 events`), in the host's local time. The client's
+  logs and retry attempts need `-v`; log timestamps are local time, and
+  logs are coloured only on a terminal without `NO_COLOR`. Event lines
+  show the uid only when known (no `(uid ?)`). On a terminal, status lines
+  are dimmed and `backfill` is coloured. `ndjson` output is unchanged.
 
 ### Documentation
 

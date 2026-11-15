@@ -1,0 +1,6 @@
+---
+source: crates/zkctl/tests/live.rs
+expression: stdout
+---
+2026-01-02T03:04:05  127.0.0.1  live      user 1 fingerprint check_in
+2026-01-02T03:04:05  127.0.0.1  live      user 2 fingerprint check_in

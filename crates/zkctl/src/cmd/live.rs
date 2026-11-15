@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
-use tokio::time::Instant;
+use tokio::time::{Instant, MissedTickBehavior};
 use zkteco_client::{CaptureOptions, CapturedEvent, Client, LiveCapture, LiveEvent, ReconnectPolicy, Resume};
 
 use super::live_state::LiveState;
+use super::live_status::{self, Link, Wording};
 
 use crate::cli::{Format, Global, LiveArgs};
 use crate::event_id::DeviceKey;
@@ -25,9 +26,14 @@ use crate::target::{self, Access, Target};
 /// Events buffered between the device tasks and the printer.
 const CHANNEL: usize = 4096;
 
+/// How often a device task checks its connection for status lines.
+const STATUS_TICK: Duration = Duration::from_millis(250);
+
 enum Msg {
     /// An event, with the device's name and its key for event ids.
     Event(String, DeviceKey, CapturedEvent),
+    /// A status line for a device (human mode only).
+    Status(String, String),
     /// A device task finished, with its outcome.
     Ended(String, Exit),
 }
@@ -40,6 +46,11 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
     let state = args.state.as_deref().map(LiveState::load);
     let (tx, rx) = mpsc::channel(CHANNEL);
     let (stop_tx, stop_rx) = watch::channel(false);
+    let wording = (g.output == Format::Human).then_some(Wording {
+        verbose: g.verbose > 0,
+        reconnect: args.reconnect,
+        backfill: args.backfill,
+    });
     let mut tasks = tokio::task::JoinSet::new();
     for t in targets {
         let resume = state
@@ -52,7 +63,7 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
         tasks.spawn(device(
             t,
             options(args, resume),
-            args.reconnect,
+            (args.reconnect, wording),
             tx.clone(),
             stop_rx.clone(),
         ));
@@ -67,6 +78,7 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
     });
     let mut printer = Printer {
         format: g.output,
+        color: g.output == Format::Human && live_status::use_color(),
         limit: args.count,
         printed: 0,
         unemitted: 0,
@@ -84,6 +96,8 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
 /// The single writer of standard output, and of the state file.
 struct Printer<'a> {
     format: Format,
+    /// Human output to a terminal, without `NO_COLOR`.
+    color: bool,
     limit: Option<u64>,
     printed: u64,
     /// Events that arrived after the limit was reached.
@@ -135,7 +149,7 @@ impl Printer<'_> {
             self.unemitted += 1;
             return Ok(false);
         }
-        print(self.format, device, key, event)?;
+        print(self.format, self.color, device, key, event)?;
         self.printed += 1;
         if let (Some(saved), LiveEvent::Attendance(a)) = (self.saved.as_mut(), &event.event) {
             saved.dirty |= saved.state.record(device, a);
@@ -144,6 +158,12 @@ impl Printer<'_> {
             }
         }
         Ok(self.limit_reached())
+    }
+
+    /// A status line: the host's local time, the device, what changed.
+    fn status(&self, device: &str, text: &str) -> Result<()> {
+        let line = format!("{}  {device}  {text}", output::local_now());
+        output::text(&live_status::dim(&line, self.color))
     }
 
     /// The final save and the `--count` report. Error if the state could
@@ -190,6 +210,7 @@ async fn print_until_done(
                     tracing::info!(device = name, ?outcome, "device stream ended");
                     exit = exit.worst(outcome);
                 }
+                Some(Msg::Status(name, text)) => printer.status(&name, &text)?,
                 Some(Msg::Event(name, key, event)) => {
                     if printer.event(&name, &key, &event)? && !stopping {
                         stopping = true;
@@ -216,23 +237,33 @@ async fn print_until_done(
     }
 }
 
-fn print(format: Format, device: &str, key: &DeviceKey, event: &CapturedEvent) -> Result<()> {
+fn print(format: Format, color: bool, device: &str, key: &DeviceKey, event: &CapturedEvent) -> Result<()> {
     let out = EventOut::captured(device, key, event);
     if format == Format::Ndjson {
         return output::ndjson(&out);
     }
     let what = match &out.raw {
         None => format!(
-            "user {} (uid {}) {} {}",
-            out.user_id.as_deref().unwrap_or("?"),
-            out.uid.map_or_else(|| "?".to_owned(), |u| u.to_string()),
+            "{} {} {}",
+            who(out.user_id.as_deref(), out.uid),
             out.status.unwrap_or_default(),
             out.punch.unwrap_or_default()
         ),
         Some(raw) => format!("event flags {:#x} payload {}", raw.flags, raw.payload_hex),
     };
     let when = out.device_time.as_deref().unwrap_or("-");
-    output::text(&format!("{when}  {device}  {:<8}  {what}", out.source))
+    let source = live_status::source_tag(out.source, color);
+    output::text(&format!("{when}  {device}  {source}  {what}"))
+}
+
+/// The person, with only what is known.
+fn who(user_id: Option<&str>, uid: Option<u16>) -> String {
+    match (user_id, uid) {
+        (Some(id), Some(uid)) => format!("user {id} (uid {uid})"),
+        (Some(id), None) => format!("user {id}"),
+        (None, Some(uid)) => format!("uid {uid}"),
+        (None, None) => "unknown user".into(),
+    }
 }
 
 fn options(args: &LiveArgs, resume: Option<Resume>) -> CaptureOptions {
@@ -251,40 +282,58 @@ fn options(args: &LiveArgs, resume: Option<Resume>) -> CaptureOptions {
 
 /// One device: connect (retrying with `--reconnect`), stream until asked to
 /// stop or the stream ends, unsubscribe, and pass on any event still
-/// queued.
+/// queued. In human mode (`wording`), connection changes become status
+/// lines.
 async fn device(
     t: Target,
     opts: CaptureOptions,
-    reconnect: bool,
+    (reconnect, wording): (bool, Option<Wording>),
     tx: mpsc::Sender<Msg>,
     mut stop: watch::Receiver<bool>,
 ) {
     let config = target::config_for(&t, Access::Live).await;
-    let Some((mut capture, key)) = subscribe(&t, reconnect, config, opts, &tx, &mut stop).await else {
+    let Some((mut capture, key)) = subscribe(&t, (reconnect, wording), config, opts, &tx, &mut stop).await
+    else {
         return;
     };
     tracing::info!(device = t.name, "subscribed");
     let mut outcome = Exit::Ok;
+    let mut link = Link::default();
+    let mut tick = tokio::time::interval(STATUS_TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Ends when asked to stop, when the stream ends, or when the printer
     // has gone.
     loop {
         tokio::select! {
-            item = capture.next() => match item {
-                Some(Ok(event)) => {
-                    if tx.send(Msg::Event(t.name.clone(), key.clone(), event)).await.is_err() {
+            item = capture.next() => {
+                // Before the event, so a reconnect is announced before
+                // what it backfilled.
+                let stats = capture.stats();
+                if let Some(w) = wording {
+                    status(&tx, &t.name, link.change(&stats, w)).await;
+                }
+                match item {
+                    Some(Ok(event)) => {
+                        if tx.send(Msg::Event(t.name.clone(), key.clone(), event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        report_error(&t.name, &e, &stats, wording, &mut link, &tx).await;
+                        outcome = classify(&anyhow::Error::from(e));
+                    }
+                    None => {
+                        eprintln!("error: {}: stream ended", t.name);
+                        outcome = outcome.worst(Exit::Connection);
                         break;
                     }
                 }
-                Some(Err(e)) => {
-                    eprintln!("warning: {}: {e}", t.name);
-                    outcome = classify(&anyhow::Error::from(e));
-                }
-                None => {
-                    eprintln!("error: {}: stream ended", t.name);
-                    outcome = outcome.worst(Exit::Connection);
-                    break;
-                }
             },
+            _ = tick.tick(), if wording.is_some() => {
+                if let Some(w) = wording {
+                    status(&tx, &t.name, link.change(&capture.stats(), w)).await;
+                }
+            }
             _ = stop.changed() => {
                 outcome = Exit::Ok;
                 break;
@@ -294,18 +343,48 @@ async fn device(
     finish(&t, &key, capture, &tx, outcome).await;
 }
 
+/// An error from the stream. In human mode, one that came with a lost
+/// connection is covered by the status lines (a failed reconnect attempt
+/// shows with `-v`); anything else is a warning.
+async fn report_error(
+    device: &str,
+    e: &zkteco_client::Error,
+    stats: &zkteco_client::CaptureStats,
+    wording: Option<Wording>,
+    link: &mut Link,
+    tx: &mpsc::Sender<Msg>,
+) {
+    match wording {
+        Some(w) if !stats.connected => status(tx, device, link.failed_attempt(stats, e, w)).await,
+        _ => eprintln!("warning: {device}: {e}"),
+    }
+}
+
+/// Send a status line to the printer, if there is one.
+async fn status(tx: &mpsc::Sender<Msg>, device: &str, line: Option<String>) {
+    let Some(line) = line else {
+        return;
+    };
+    // Fails only if the printer has already returned.
+    if tx.send(Msg::Status(device.to_owned(), line)).await.is_err() {
+        tracing::debug!(device, "printer gone before a status line");
+    }
+}
+
 /// The first subscription, and the device's key for event ids, read on the
 /// same connection. With `--reconnect`, failures are retried with backoff
-/// until it works or the command stops.
+/// until it works or the command stops; in human mode the first failure
+/// and the eventual success are status lines.
 async fn subscribe(
     t: &Target,
-    reconnect: bool,
+    (reconnect, wording): (bool, Option<Wording>),
     config: zkteco_client::ClientConfig,
     opts: CaptureOptions,
     tx: &mpsc::Sender<Msg>,
     stop: &mut watch::Receiver<bool>,
 ) -> Option<(LiveCapture, DeviceKey)> {
     let policy = ReconnectPolicy::default();
+    let started = Instant::now();
     // Bounded by `--reconnect` (one attempt without it) and by the stop
     // signal; with it, retries go on until either succeeds.
     for failures in 0u32.. {
@@ -316,17 +395,27 @@ async fn subscribe(
                 return None;
             }
         };
-        match attempt {
-            Ok(subscribed) => return Some(subscribed),
-            Err(e) => {
-                let e = anyhow::Error::from(e).context(format!("subscribing to {}", t.name));
-                eprintln!("error: {e:#}");
-                let fatal = classify(&e) == Exit::Auth;
-                if !reconnect || fatal {
-                    ended(tx, &t.name, classify(&e)).await;
-                    return None;
+        let e = match attempt {
+            Ok(subscribed) => {
+                if failures > 0 && wording.is_some() {
+                    status(tx, &t.name, Some(live_status::connected_after(started.elapsed()))).await;
                 }
+                return Some(subscribed);
             }
+            Err(e) => e,
+        };
+        let shown = e.to_string();
+        let e = anyhow::Error::from(e).context(format!("subscribing to {}", t.name));
+        let fatal = classify(&e) == Exit::Auth;
+        match wording {
+            Some(w) if reconnect && !fatal => {
+                status(tx, &t.name, live_status::connect_failed(failures, &shown, w)).await;
+            }
+            _ => eprintln!("error: {e:#}"),
+        }
+        if !reconnect || fatal {
+            ended(tx, &t.name, classify(&e)).await;
+            return None;
         }
         tokio::select! {
             () = tokio::time::sleep(policy.backoff(failures)) => {}

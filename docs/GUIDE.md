@@ -112,9 +112,17 @@ zkctl live -d front -d lobby --reconnect --backfill
 ```
 
 Each punch arrives once: as `live` while connected, or as `backfill` after
-a drop. During a drop `zkctl` prints warnings such as `warning: front:
-connection closed` and reconnects with backoff, so the first reconnect
-attempt may also fail. Add `--output ndjson` to see the event objects.
+a drop, announced by status lines:
+
+```text
+2026-11-16T00:50:06  front  live      user 1009 password check_in
+2026-11-16T00:50:06  front  disconnected, reconnecting…
+2026-11-16T00:50:14  front  reconnected after 7.8 s, backfilled 5 events
+2026-11-16T00:50:07  front  backfill  user 1010 (uid 10) fingerprint check_out
+```
+
+Add `-v` to see each failed reconnect attempt and the client's logs, or
+`--output ndjson` for the event objects.
 
 | Option | Default | |
 |---|---|---|
@@ -204,7 +212,7 @@ devices whose clocks may differ.
 | Situation | Without `--reconnect` | With `--reconnect` |
 |---|---|---|
 | Device unreachable at start | Exit 3 | Retries with backoff (1 s doubling to 30 s) until it connects or Ctrl-C |
-| Connection lost | That device's stream ends; exit 3 when all end | Reconnects and resubscribes; a warning on standard error |
+| Connection lost | That device's stream ends; exit 3 when all end | Reconnects and resubscribes (status lines in human output, a warning on standard error in ndjson) |
 | Wrong password | Exit 4 | Exit 4 (not retried) |
 | Device silent (power loss without a TCP close) | Detected by keepalive and by the heartbeat | Same, then reconnects |
 
@@ -212,6 +220,24 @@ The heartbeat (every 60 s without a packet) asks the device for its clock.
 It tolerates up to three unanswered heartbeats in a row before treating
 the connection as dead, because it is not yet known whether every
 firmware answers requests while subscribed (Q6).
+
+In human output (the default), `live` reports each device's connection as
+status lines on standard output, in order with the events, stamped with the
+host's local time:
+
+| Line | When |
+|---|---|
+| `front  cannot connect (…), retrying…` | The first connection fails, with `--reconnect` |
+| `front  connected after 3.0 s` | It then works |
+| `front  disconnected, reconnecting…` | The connection is lost (`disconnected` without `--reconnect`) |
+| `front  reconnected after 6.2 s, backfilled 3 events` | Resubscribed, and with `--backfill`, caught up |
+| `front  reconnect failed (attempt 2): …` | Each failed attempt, only with `-v` |
+
+The client's own logs (retries, reconnect attempts) appear only with `-v`;
+log timestamps are local time too. On a terminal, status lines are dimmed
+and `backfill` is coloured, unless `NO_COLOR` is set. Event lines show the
+uid only when it is known. `--output ndjson` is unchanged: no status
+lines, warnings and logs on standard error as before.
 
 ### Backfill and duplicates
 

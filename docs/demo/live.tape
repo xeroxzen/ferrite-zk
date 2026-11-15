@@ -44,7 +44,7 @@ Sleep 1s
 Type "zkctl device add lobby --host 127.0.0.1 --port 14371 --transport tcp"
 Enter
 Sleep 1s
-Type "zkctl -q live -d front -d lobby --reconnect --backfill"
+Type "zkctl live -d front -d lobby --reconnect --backfill"
 Enter
 Sleep 48s
 Ctrl+C

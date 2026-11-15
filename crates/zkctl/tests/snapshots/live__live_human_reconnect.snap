@@ -1,0 +1,9 @@
+---
+source: crates/zkctl/tests/live.rs
+expression: mask_clock(&stdout)
+---
+[local time]  127.0.0.1  disconnected, reconnecting…
+[local time]  127.0.0.1  reconnected after [n] s, backfilled 2 events
+2026-01-02T03:04:05  127.0.0.1  backfill  user 1 (uid 1) fingerprint check_in
+2026-01-02T03:04:05  127.0.0.1  backfill  user 2 (uid 2) fingerprint check_in
+2026-01-02T03:04:05  127.0.0.1  live      user 3 fingerprint check_in

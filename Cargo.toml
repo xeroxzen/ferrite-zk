@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/zkteco-proto", "crates/zkteco-client", "crates/zkctl", "xtask"]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ categories = ["hardware-support", "network-programming"]
 exclude = ["/tools", "/tests/fixtures/captures"]
 
 [workspace.dependencies]
-zkteco-proto = { path = "crates/zkteco-proto", version = "0.1.0-alpha.1" }
+zkteco-proto = { path = "crates/zkteco-proto", version = "0.1.0-alpha.2" }
 bitflags = "2.6"
 bytes = "1.7"
 chrono = { version = "0.4.38", default-features = false, features = ["alloc"] }
@@ -41,8 +41,8 @@ futures-core = "0.3.31"
 socket2 = { version = "0.5.7", features = ["all"] }
 futures-util = { version = "0.3.31", default-features = false }
 tracing-subscriber = { version = "0.3.18", default-features = false, features = ["fmt", "env-filter", "ansi"] }
-zkteco-client = { path = "crates/zkteco-client", version = "0.1.0-alpha.1" }
-zkctl = { path = "crates/zkctl", version = "0.1.0-alpha.1" }
+zkteco-client = { path = "crates/zkteco-client", version = "0.1.0-alpha.2" }
+zkctl = { path = "crates/zkctl", version = "0.1.0-alpha.2" }
 tokio = { version = "1.40", default-features = false }
 
 [workspace.lints.rust]

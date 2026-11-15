@@ -60,17 +60,56 @@ async fn subscribed(dev: &MockDevice, n: usize) {
 
 /// Wait for the process and return its stdout lines as JSON, and its code.
 async fn finish(child: Child) -> (Vec<Value>, i32, String) {
+    let (stdout, code, stderr) = finish_text(child).await;
+    let lines = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    (lines, code, stderr)
+}
+
+/// Wait for the process and return its stdout, its code and its stderr.
+async fn finish_text(child: Child) -> (String, i32, String) {
     let out = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
         .await
         .expect("zkctl live finished in time")
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
-    let lines = stdout
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
-        .collect();
-    (lines, out.status.code().unwrap_or(-1), stderr)
+    (stdout, out.status.code().unwrap_or(-1), stderr)
+}
+
+/// Stderr of a human-mode run at default verbosity: at most the `--count`
+/// report, no logs or warnings.
+fn assert_no_logs(stderr: &str) {
+    for line in stderr.lines() {
+        assert!(
+            line.starts_with("stopped after "),
+            "unexpected on stderr: {stderr}"
+        );
+    }
+}
+
+/// Human output with the host's clock masked: status lines start with the
+/// local time, and say how long a reconnect took.
+fn mask_clock(stdout: &str) -> String {
+    let mut masked = String::new();
+    for l in stdout.lines() {
+        let (when, rest) = l.split_at(l.len().min(19));
+        let is_status = !rest.contains("  live  ") && !rest.contains("  backfill  ");
+        masked.push_str(if is_status { "[local time]" } else { when });
+        match rest.split_once(" after ") {
+            Some((head, tail)) => {
+                let tail = tail.split_once(" s").map_or(tail, |(_, t)| t);
+                masked.push_str(head);
+                masked.push_str(" after [n] s");
+                masked.push_str(tail);
+            }
+            None => masked.push_str(rest),
+        }
+        masked.push('\n');
+    }
+    masked
 }
 
 /// Fail unless `event` matches docs/schema/event-v1.json.
@@ -553,4 +592,85 @@ async fn live_ids_fall_back_to_the_profile_name() {
             "empty: {empty}: {stderr}"
         );
     }
+}
+
+/// Human output shows only what is known: live events in the 12-byte
+/// layout carry a user ID but no uid, so no `(uid ?)`. Nothing from the
+/// client's logs on stderr, and no colour when stdout is not a terminal.
+#[tokio::test]
+async fn human_output_shows_known_fields_only() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = strings(&["live", "--count", "2"]);
+    args.extend(host(&dev));
+    let child = zkctl(&dir.path().join("c.toml"), &args);
+    subscribed(&dev, 1).await;
+    dev.push_events(2);
+    let (stdout, code, stderr) = finish_text(child).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains('\x1b'), "{stdout:?}");
+    assert_no_logs(&stderr);
+    insta::assert_snapshot!("live_human", stdout);
+}
+
+/// A lost connection is one status line, the reconnect another, with the
+/// backfilled count; the client's own logs and retries stay off stderr.
+#[tokio::test]
+async fn human_status_lines_across_a_reconnect() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = strings(&["live", "--reconnect", "--backfill", "--count", "3"]);
+    args.extend(host(&dev));
+    let mut child = zkctl(&dir.path().join("c.toml"), &args);
+    let mut reader = BufReader::new(child.stdout.take().unwrap()).lines();
+    subscribed(&dev, 1).await;
+    // With --backfill, subscribing ends by reading the device clock;
+    // dropping before that would fail the first connection instead.
+    for _ in 0..1000 {
+        if dev.count(Command::GetTime) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(dev.count(Command::GetTime), 1, "subscribed");
+    dev.drop_connection();
+    dev.record_offline(2);
+    let mut lines = Vec::new();
+    // The live punch only after the backfill, or it would be backfilled
+    // too. Bounded: the status lines and two backfilled events come first.
+    for _ in 0..4 {
+        lines.push(next_text_line(&mut reader).await);
+        if lines.last().is_some_and(|l| l.contains("reconnected")) {
+            break;
+        }
+    }
+    dev.push_events(1);
+    // Bounded by the timeout in `next_text_line` and by `--count`.
+    while lines.len() < 5 {
+        lines.push(next_text_line(&mut reader).await);
+    }
+    let (_, code, stderr) = finish_text(child).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_no_logs(&stderr);
+    let stdout = lines.join("\n") + "\n";
+    let status: Vec<&String> = lines
+        .iter()
+        .filter(|l| !l.contains("  live  ") && !l.contains("  backfill  "))
+        .collect();
+    assert!(
+        status.iter().all(|l| l.as_bytes()[..19]
+            .iter()
+            .all(|b| b.is_ascii_digit() || b"-T:".contains(b))),
+        "status lines start with the local time: {status:?}"
+    );
+    insta::assert_snapshot!("live_human_reconnect", mask_clock(&stdout));
+}
+
+/// The next stdout line, as text.
+async fn next_text_line(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>) -> String {
+    tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+        .await
+        .expect("a line in time")
+        .unwrap()
+        .expect("stdout still open")
 }

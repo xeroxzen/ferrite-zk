@@ -2630,7 +2630,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zkctl"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "zkteco-client"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "zkteco-proto"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "bitflags",
  "bytes",

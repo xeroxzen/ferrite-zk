@@ -92,10 +92,13 @@ impl Capture {
             return self.admit(queued).map_or(Step::Idle, Step::Event);
         }
         if !self.client.is_connected() {
+            self.counters.connected.store(false, Ordering::Relaxed);
             return self.recover().await;
         }
         if let Err(e) = self.listen().await {
-            tracing::warn!(%e, connected = self.client.is_connected(), "live capture error");
+            let connected = self.client.is_connected();
+            self.counters.connected.store(connected, Ordering::Relaxed);
+            tracing::warn!(%e, connected, "live capture error");
             return Step::Failed(e);
         }
         match self.client.pop_pending() {
@@ -209,6 +212,9 @@ impl Capture {
         };
         if let Err(e) = attempt.await {
             self.failures = self.failures.saturating_add(1);
+            self.counters
+                .reconnect_failures
+                .store(self.failures, Ordering::Relaxed);
             if matches!(e, Error::Unauthorized) {
                 self.ended = true;
             }
@@ -218,11 +224,18 @@ impl Capture {
         tracing::info!(after_failures = self.failures, "live capture resubscribed");
         self.failures = 0;
         self.counters.reconnects.fetch_add(1, Ordering::Relaxed);
-        if self.opts.backfill {
-            if let Err(e) = self.backfill().await {
-                tracing::warn!(%e, "backfill after reconnect failed");
-                return Step::Failed(e);
-            }
+        let backfilled = if self.opts.backfill {
+            self.backfill().await
+        } else {
+            Ok(())
+        };
+        self.counters.reconnect_failures.store(0, Ordering::Relaxed);
+        self.counters
+            .connected
+            .store(self.client.is_connected(), Ordering::Relaxed);
+        if let Err(e) = backfilled {
+            tracing::warn!(%e, "backfill after reconnect failed");
+            return Step::Failed(e);
         }
         Step::Idle
     }

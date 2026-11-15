@@ -9,6 +9,7 @@ mod enroll;
 mod info;
 mod live;
 mod live_state;
+mod live_status;
 mod templates;
 mod time;
 mod users;

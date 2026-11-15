@@ -776,6 +776,30 @@ list.
   time, since backfill starts from the device clock (D31). Randomness is a
   seeded SplitMix64 in the example, not a new dependency.
 
+## D38. `live` status lines in human output
+
+- Human `live` output reported connection trouble through the client's
+  tracing (retries, reconnect attempts, UTC timestamps) and `warning:`
+  lines, several per drop. Now each device gets one status line per change
+  (disconnected, reconnected with the backfilled count; the first
+  connection failing and then working), and the client's logs need `-v`.
+  Machine output (`ndjson`) is unchanged.
+- Status lines go to standard output, through the single printer, so they
+  stay in order with the events they explain (a reconnect line comes
+  before what it backfilled). They are human output only; `ndjson` never
+  carries them.
+- zkctl cannot tell a lost connection from other stream errors, or see a
+  reconnect that backfilled nothing, from the stream alone. The client now
+  says so: `CaptureStats::connected` (false from the loss until the
+  resubscription and its backfill are done, so the count is final) and
+  `reconnect_failures`. Each device task reads them on every item and
+  every 250 ms. Adding public fields to `CaptureStats` breaks struct
+  literals without `..Default::default()`; acceptable while alpha.
+- Times in status lines and logs are the host's local time, in the format
+  of event lines (which show the device's time). Colour (dimmed status,
+  coloured `backfill`, coloured logs) only on a terminal and without
+  `NO_COLOR`.
+
 ## Known issues
 
 - **`merges_devices_across_a_reconnect` (zkctl `tests/live.rs`) hung once.**
@@ -791,6 +815,10 @@ list.
   test now passes `--duration 10s`, so a recurrence ends with the events
   received and fails on the assertions showing which are missing. Not
   fixed; to be revisited if it recurs.
+  Recurred once on 2026-11-16 (D38 work), with events missing at the
+  `--duration` backstop, while three cargo builds and test runs shared
+  the machine; it then passed 30 consecutive runs of the live suite.
+  Consistent with the load hypothesis; still not fixed.
 
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 

@@ -92,8 +92,10 @@ zkctl device add lobby --host 127.0.0.1 --port 14371 --transport tcp
 zkctl live -d front -d lobby --reconnect --backfill
 ```
 
-Punches arrive as `live`. When a device drops, `zkctl` warns, reconnects,
-and the punches recorded meanwhile arrive as `backfill`, each exactly once.
+Punches arrive as `live`. When a device drops, `zkctl` prints one status
+line (`front  disconnected, reconnecting…`), and once it is back another
+(`front  reconnected after 6.2 s, backfilled 3 events`), followed by the
+punches recorded meanwhile as `backfill`, each exactly once.
 The other read commands work too (`zkctl -d front users list`,
 `zkctl -d lobby attendance pull`). Details and options are in the
 [guide](docs/GUIDE.md#try-it-without-hardware);
