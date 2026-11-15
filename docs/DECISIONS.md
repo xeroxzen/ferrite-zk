@@ -743,6 +743,39 @@ list.
   library. Changing the encoding changes every id, so it would need schema
   version 2.
 
+## D37. The demo device (after the 0.1.0-alpha.1 release)
+
+- `cargo run -p zkteco-client --example demo_device` runs the test suite's
+  mock device stand-alone, so `zkctl` can be tried without hardware. It
+  reuses the mock rather than a second implementation: one protocol
+  responder to keep correct.
+- The mock moved from `tests/support` (pulled into each test crate with
+  `#[path]`) into the crate as `zkteco_client::demo`, behind a `demo`
+  feature that is off by default and `#[doc(hidden)]`. It is a fixture,
+  not API: it panics on malformed input and may change in any release.
+  The library's own build is unchanged (the feature only adds tokio's `rt`
+  and `sync`).
+- `zkteco-client` has a dev-dependency on itself with `demo`, so tests and
+  examples get the feature and `cargo run --example demo_device` needs no
+  `--features`; Cargo strips path dev-dependencies when publishing.
+  `zkctl`'s tests enable it through their own dev-dependency.
+  `tests/support/mod.rs` is now a re-export, so the tests are unchanged.
+  The example and the tests that use the mock declare
+  `required-features = ["demo"]`, so a build from the published package
+  without the feature skips them instead of failing.
+- The mock gained what the demo needs and the tests may use: binding a
+  given port (`start_on`), pushing an arbitrary punch (`push_punch`), and
+  going offline (`set_offline`: closes connections, refuses new ones,
+  ignores datagrams, keeps recording). Its private exchange state moved
+  into a `Session` field so other crates can still write
+  `..DeviceState::default()`.
+- The example sends a punch as an event only while a client is
+  subscribed, as a device does; otherwise the punch is only stored. Each
+  device's serial number is `DEMO-<NAME>`, so two demo devices do not
+  share event ids (D36). It keeps the device clock at the host's local
+  time, since backfill starts from the device clock (D31). Randomness is a
+  seeded SplitMix64 in the example, not a new dependency.
+
 ## Known issues
 
 - **`merges_devices_across_a_reconnect` (zkctl `tests/live.rs`) hung once.**

@@ -58,6 +58,9 @@ mod client;
 pub mod compat;
 mod config;
 mod data;
+#[cfg(feature = "demo")]
+#[doc(hidden)]
+pub mod demo;
 mod device;
 mod diag;
 mod enroll;

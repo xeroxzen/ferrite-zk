@@ -41,7 +41,9 @@ CI runs these on stable and on 1.88. Clippy runs in pedantic mode
 `allow`s, and give any `allow` a `reason`.
 
 Everything is tested against the mock device in
-`crates/zkteco-client/tests/support/`, which can inject faults (dropped
+`crates/zkteco-client/src/demo/` (the `demo` feature, off by default and
+hidden from the docs; the tests and the `demo_device` example enable it),
+which can inject faults (dropped
 connections and replies, corrupt checksums, split and coalesced TCP
 frames, UDP loss, duplication and reordering). New client behaviour comes
 with a mock test. `zkctl` tests run the real binary against the mock

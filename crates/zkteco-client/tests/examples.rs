@@ -9,6 +9,13 @@ mod support;
     unreachable_pub,
     reason = "main is for cargo run --example; pub is for readers"
 )]
+#[path = "../examples/demo_device.rs"]
+mod demo_device;
+#[allow(
+    dead_code,
+    unreachable_pub,
+    reason = "main is for cargo run --example; pub is for readers"
+)]
 #[path = "../examples/list_users.rs"]
 mod list_users;
 #[allow(
@@ -37,7 +44,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use support::{punches, users, DeviceState, MockDevice};
-use zkteco_client::{LiveEvent, Source};
+use zkteco_client::{CaptureOptions, CapturedEvent, LiveCapture, LiveEvent, ReconnectPolicy, Source};
 
 async fn wait_subscribed(dev: &MockDevice) {
     for _ in 0..500 {
@@ -130,4 +137,74 @@ async fn multi_device_live_example() {
     assert_eq!(got, ["a", "b", "b"]);
     assert_eq!(a.state().event_masks, [1, 0]);
     assert_eq!(b.state().event_masks, [1, 0]);
+}
+
+/// A demo device for the tests: fast punches, a free port.
+fn demo_options(drop_every: Option<Duration>) -> demo_device::Options {
+    demo_device::Options {
+        port: 0,
+        interval: Duration::from_millis(60),
+        drop_every,
+        drop_for: Duration::from_millis(300),
+        ..demo_device::Options::default()
+    }
+}
+
+/// Subscribe to `demo`, with fast reconnects, and return the first event
+/// that `wanted` accepts, within 10 seconds.
+async fn demo_event(demo: demo_device::Demo, wanted: impl Fn(&CapturedEvent) -> bool) -> CapturedEvent {
+    let opts = CaptureOptions {
+        reconnect: Some(ReconnectPolicy {
+            max_attempts: u32::MAX,
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(200),
+        }),
+        backfill: true,
+        ..CaptureOptions::default()
+    };
+    let mut capture = LiveCapture::connect(demo.config(), opts).await.unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let stop = async {
+        stop_rx.await.expect("the test keeps the stop sender");
+    };
+    let watch = async {
+        let found = tokio::time::timeout(Duration::from_secs(10), async {
+            // Bounded by the timeout.
+            loop {
+                match capture.next().await {
+                    Some(Ok(e)) if wanted(&e) => return e,
+                    Some(_) => {}
+                    None => panic!("the stream ended"),
+                }
+            }
+        })
+        .await
+        .expect("an event in time");
+        stop_tx.send(()).unwrap();
+        found
+    };
+    let ((), found) = tokio::join!(demo.run(stop, |_| {}), watch);
+    found
+}
+
+#[tokio::test]
+async fn demo_device_example() {
+    let demo = demo_device::start(demo_options(None)).await.unwrap();
+    let event = demo_event(demo, |_| true).await;
+    assert_eq!(event.source, Source::Live);
+    let LiveEvent::Attendance(a) = event.event else {
+        panic!("{event:?}");
+    };
+    let user: u32 = a.user_id.unwrap().as_str().parse().unwrap();
+    assert!((1001..=1010).contains(&user), "{user}");
+}
+
+/// Punches recorded while the demo device is offline come back by backfill.
+#[tokio::test]
+async fn demo_device_drops_and_backfills() {
+    let demo = demo_device::start(demo_options(Some(Duration::from_millis(500))))
+        .await
+        .unwrap();
+    let event = demo_event(demo, |e| e.source == Source::Backfill).await;
+    assert!(matches!(event.event, LiveEvent::Attendance(_)));
 }

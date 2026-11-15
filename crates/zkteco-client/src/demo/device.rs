@@ -143,13 +143,25 @@ pub struct DeviceState {
     pub enroll_requests: Vec<Vec<u8>>,
     /// Unframed packets waiting to be pushed to the client unprompted.
     pub outbox: Vec<Vec<u8>>,
+    /// The device is unreachable: connections are closed as soon as they
+    /// are accepted, and datagrams go unanswered
+    /// ([`MockDevice::set_offline`](super::MockDevice::set_offline)).
+    pub offline: bool,
     /// Close the connection the next time the outbox is delivered.
     pub close_pushed: bool,
+    /// Protocol state of the current exchange, internal to the mock.
+    pub session: Session,
+}
+
+/// Protocol state of the current exchange: private, so that tests can still
+/// build a [`DeviceState`] with `..DeviceState::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct Session {
     /// Packets to send after the replies to the current request.
-    pub(crate) trailing: Vec<Vec<u8>>,
-    pub(crate) authenticated: bool,
-    pub(crate) staged: Option<Vec<u8>>,
-    pub(crate) upload: Option<(usize, Vec<u8>)>,
+    trailing: Vec<Vec<u8>>,
+    authenticated: bool,
+    staged: Option<Vec<u8>>,
+    upload: Option<(usize, Vec<u8>)>,
 }
 
 impl Default for DeviceState {
@@ -190,11 +202,9 @@ impl Default for DeviceState {
             enroll_script: Vec::new(),
             enroll_requests: Vec::new(),
             outbox: Vec::new(),
+            offline: false,
             close_pushed: false,
-            trailing: Vec::new(),
-            authenticated: false,
-            staged: None,
-            upload: None,
+            session: Session::default(),
         }
     }
 }
@@ -260,7 +270,7 @@ impl DeviceState {
                 last[2] ^= 0xFF;
             }
         }
-        replies.append(&mut self.trailing);
+        replies.append(&mut self.session.trailing);
         Outcome { replies, close }
     }
 
@@ -293,8 +303,14 @@ impl DeviceState {
     pub fn event_packet(&mut self) -> Vec<u8> {
         self.events_sent += 1;
         let a = self.last_event_record();
+        self.event_packet_of(&a)
+    }
+
+    /// An `ATTLOG` event for this punch, in the 12-byte layout. The user ID
+    /// must be numeric.
+    pub fn event_packet_of(&self, a: &Attendance) -> Vec<u8> {
         let payload = zkteco_proto::records::event::encode_record(
-            &a,
+            a,
             zkteco_proto::records::event::EventRecordFormat::Numeric12,
             self.encoding,
         )
@@ -319,7 +335,7 @@ impl DeviceState {
         match cmd {
             Command::Connect => return (self.connect(), false),
             Command::Auth => return (self.auth(p), false),
-            _ if !self.authenticated => return (self.reply(Command::AckUnauth), false),
+            _ if !self.session.authenticated => return (self.reply(Command::AckUnauth), false),
             _ if self.faults.ack_unauth == Some(cmd) => return (self.reply(Command::AckUnauth), false),
             _ if self.faults.ack_error == Some(cmd) => return (self.reply(Command::AckError), false),
             Command::Exit | Command::Restart | Command::PowerOff => return (self.ok(Vec::new()), true),
@@ -329,7 +345,7 @@ impl DeviceState {
             Command::PrepareBuffer => self.prepare_buffer(p),
             Command::ReadBuffer => self.read_buffer(p),
             Command::FreeData => {
-                self.staged = None;
+                self.session.staged = None;
                 self.ok(Vec::new())
             }
             Command::PrepareData | Command::Data => self.receive_upload(cmd, p),
@@ -340,8 +356,8 @@ impl DeviceState {
     }
 
     fn connect(&mut self) -> Vec<(Command, u16, Vec<u8>)> {
-        self.authenticated = self.password.is_none();
-        let code = if self.authenticated {
+        self.session.authenticated = self.password.is_none();
+        let code = if self.session.authenticated {
             Command::AckOk
         } else {
             Command::AckUnauth
@@ -355,8 +371,8 @@ impl DeviceState {
             self.session_id,
             commkey::DEFAULT_TICKS,
         );
-        self.authenticated = key == expected;
-        let code = if self.authenticated {
+        self.session.authenticated = key == expected;
+        let code = if self.session.authenticated {
             Command::AckOk
         } else {
             Command::AckUnauth
@@ -397,7 +413,7 @@ impl DeviceState {
             return vec![(Command::Data, self.session_id, data)];
         }
         let size = u32::try_from(data.len()).unwrap();
-        self.staged = Some(data);
+        self.session.staged = Some(data);
         self.ok(requests::encode_prepare_buffer_ack(size).to_vec())
     }
 
@@ -407,6 +423,7 @@ impl DeviceState {
         };
         let (start, size) = (start as usize, size as usize);
         let Some(chunk) = self
+            .session
             .staged
             .as_ref()
             .and_then(|s| s.get(start..start + size))
@@ -482,15 +499,15 @@ impl DeviceState {
     fn receive_upload(&mut self, cmd: Command, p: &[u8]) -> Vec<(Command, u16, Vec<u8>)> {
         if cmd == Command::PrepareData {
             let size = u32::from_le_bytes([p[0], p[1], p[2], p[3]]) as usize;
-            self.upload = Some((size, Vec::new()));
+            self.session.upload = Some((size, Vec::new()));
             return self.ok(Vec::new());
         }
-        let Some((size, buf)) = self.upload.as_mut() else {
+        let Some((size, buf)) = self.session.upload.as_mut() else {
             return self.reply(Command::AckError);
         };
         buf.extend_from_slice(p);
         if buf.len() == *size {
-            self.uploaded = self.upload.take().map(|(_, b)| b);
+            self.uploaded = self.session.upload.take().map(|(_, b)| b);
         }
         self.ok(Vec::new())
     }
@@ -559,7 +576,7 @@ impl DeviceState {
             Command::StartEnroll => {
                 self.enroll_requests.push(p.to_vec());
                 let script = std::mem::take(&mut self.enroll_script);
-                self.trailing = script.iter().map(|(f, r)| event_with(*f, r)).collect();
+                self.session.trailing = script.iter().map(|(f, r)| event_with(*f, r)).collect();
                 self.ok(Vec::new())
             }
             Command::RefreshData

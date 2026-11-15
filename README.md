@@ -72,6 +72,34 @@ async fn main() -> zkteco_client::Result<()> {
 More in [the examples](crates/zkteco-client/examples) and the
 [guide](docs/GUIDE.md).
 
+## Try it without hardware
+
+A demo device, the mock device from the test suite, has ten fictional
+users who punch every few seconds, and drops off the network for 5 s every
+30 s while it keeps recording punches. From a clone of this repository,
+start two, each in its own terminal:
+
+```sh
+cargo run -p zkteco-client --example demo_device -- --name front --port 14370
+cargo run -p zkteco-client --example demo_device -- --name lobby --port 14371
+```
+
+Then, in a third, register both and stream from them:
+
+```sh
+zkctl device add front --host 127.0.0.1 --port 14370 --transport tcp
+zkctl device add lobby --host 127.0.0.1 --port 14371 --transport tcp
+zkctl live -d front -d lobby --reconnect --backfill
+```
+
+Punches arrive as `live`. When a device drops, `zkctl` warns, reconnects,
+and the punches recorded meanwhile arrive as `backfill`, each exactly once.
+The other read commands work too (`zkctl -d front users list`,
+`zkctl -d lobby attendance pull`). Details and options are in the
+[guide](docs/GUIDE.md#try-it-without-hardware);
+[`docs/demo/live.tape`](docs/demo/live.tape) records this session as a GIF
+with [vhs](https://github.com/charmbracelet/vhs).
+
 ## Documentation
 
 - [docs/GUIDE.md](docs/GUIDE.md): getting started, transports, reliability,

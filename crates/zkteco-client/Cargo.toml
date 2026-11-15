@@ -16,6 +16,10 @@ documentation = "https://docs.rs/zkteco-client"
 # Enables tests against a real device (tests/hardware.rs). See that file for
 # the environment variables.
 hardware = []
+# The mock device (`zkteco_client::demo`, hidden from the documentation):
+# for this workspace's tests and the `demo_device` example. Not part of the
+# API; may change in any release.
+demo = ["tokio/rt", "tokio/sync"]
 
 [dependencies]
 bytes.workspace = true
@@ -28,8 +32,42 @@ tracing.workspace = true
 zkteco-proto.workspace = true
 
 [dev-dependencies]
+chrono = { workspace = true, features = ["clock"] }
 futures-util.workspace = true
+# Itself with the mock device, for the tests and examples, so `cargo run
+# --example demo_device` needs no `--features`. Stripped on publish.
+zkteco-client = { path = ".", features = ["demo"] }
 tokio = { workspace = true, features = ["net", "time", "io-util", "rt", "rt-multi-thread", "macros", "sync", "signal"] }
+
+# The mock device needs `demo`, which the dev-dependency on itself enables
+# here; a build from the published package without it skips these.
+[[example]]
+name = "demo_device"
+required-features = ["demo"]
+
+[[test]]
+name = "enroll"
+required-features = ["demo"]
+
+[[test]]
+name = "examples"
+required-features = ["demo"]
+
+[[test]]
+name = "live"
+required-features = ["demo"]
+
+[[test]]
+name = "modes"
+required-features = ["demo"]
+
+[[test]]
+name = "tcp"
+required-features = ["demo"]
+
+[[test]]
+name = "udp"
+required-features = ["demo"]
 
 [lints]
 workspace = true

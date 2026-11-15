@@ -2668,6 +2668,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "zkteco-client",
  "zkteco-proto",
 ]
 

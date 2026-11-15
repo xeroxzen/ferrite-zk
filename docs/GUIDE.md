@@ -21,7 +21,8 @@ to the open questions in [DECISIONS.md](DECISIONS.md).
 
 The device must be reachable on port 4370 (TCP or UDP). Its *comm key*
 (communication password, a number, `0` when unset) is set in the device
-menu under communication settings.
+menu under communication settings. No device at hand? See
+[Try it without hardware](#try-it-without-hardware).
 
 ### Command line
 
@@ -80,6 +81,55 @@ devices at once.
 Users have two identities, kept as distinct types: `Uid`, the device's
 internal slot number, and `UserId`, the ID people see and type. Commands
 that pick a user take one or the other explicitly (`--uid` or `--user-id`).
+
+### Try it without hardware
+
+`demo_device` runs the mock device from the test suite as a stand-alone
+device on 127.0.0.1. It has ten fictional users (user IDs 1001 to 1010,
+names like "Ada Example"), a dozen earlier punches in its log, and:
+
+- a punch every 2 to 4 seconds, by a random user, alternating check-in
+  and check-out;
+- every 30 seconds, 5 seconds offline: connections are closed and new ones
+  refused, and punches go on being recorded in the log;
+- serial number `DEMO-<NAME>`, so two demo devices have different event
+  ids ([Deduplicating](#deduplicating-on-id)).
+
+From a clone of this repository, start two devices, each in its own
+terminal:
+
+```sh
+cargo run -p zkteco-client --example demo_device -- --name front --port 14370
+cargo run -p zkteco-client --example demo_device -- --name lobby --port 14371
+```
+
+Then, in a third, register both and stream from them:
+
+```sh
+zkctl device add front --host 127.0.0.1 --port 14370 --transport tcp
+zkctl device add lobby --host 127.0.0.1 --port 14371 --transport tcp
+zkctl live -d front -d lobby --reconnect --backfill
+```
+
+Each punch arrives once: as `live` while connected, or as `backfill` after
+a drop. During a drop `zkctl` prints warnings such as `warning: front:
+connection closed` and reconnects with backoff, so the first reconnect
+attempt may also fail. Add `--output ndjson` to see the event objects.
+
+| Option | Default | |
+|---|---|---|
+| `--port N` | 14370 | TCP and UDP port on 127.0.0.1 |
+| `--name NAME` | `front` | Device name, in the serial number and the printed commands |
+| `--interval SECS` | 3 | Mean time between punches |
+| `--drop-every SECS` | 30 | How often to go offline, for 5 s |
+| `--no-drops` | | Never go offline |
+| `--seed N` | 1 | The same seed gives the same people and punches, for recordings |
+
+The device accepts writes too (`users add`, `time set`, `attendance
+clear`); they change its memory only and are gone when it stops. Remove
+the profiles afterwards with `zkctl device remove front` (and `lobby`).
+[`docs/demo/live.tape`](demo/live.tape) records the session above as a GIF
+with [vhs](https://github.com/charmbracelet/vhs).
 
 ## Transports
 

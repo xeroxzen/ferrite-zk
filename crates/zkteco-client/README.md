@@ -48,9 +48,11 @@ against the mock device:
 | `pull_attendance_since` | Attendance from a point in time, with user IDs resolved |
 | `live_with_shutdown` | Streaming until Ctrl-C, then a clean unsubscribe |
 | `multi_device_live` | Several devices merged into one channel, each event tagged |
+| `demo_device` | A stand-alone demo device for trying `zkctl` without hardware (built on the mock device, the `demo` feature) |
 
 ```sh
 ZK_HOST=192.168.1.201 cargo run -p zkteco-client --example live_with_shutdown
+cargo run -p zkteco-client --example demo_device   # a demo device, no hardware
 ```
 
 ## Documentation

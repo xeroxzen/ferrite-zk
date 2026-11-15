@@ -8,7 +8,8 @@ license.workspace = true
 repository.workspace = true
 keywords = ["zkteco", "attendance", "biometric", "cli", "access-control"]
 categories = ["command-line-utilities", "hardware-support"]
-# The tests use the mock device from zkteco-client/tests, outside this package.
+# The tests need the workspace (the mock device, docs/schema), so they are
+# not published.
 exclude = ["/tests"]
 readme = "README.md"
 documentation = "https://docs.rs/zkctl"
@@ -42,3 +43,5 @@ insta.workspace = true
 jsonschema.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "net", "io-util", "process"] }
+# The mock device, zkteco_client::demo.
+zkteco-client = { workspace = true, features = ["demo"] }

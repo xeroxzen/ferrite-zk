@@ -28,6 +28,8 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
+      - name: Demo device example builds as documented (no --features)
+        run: cargo build -p zkteco-client --example demo_device
       - name: Man pages and completions build
         run: cargo xtask man target/man && cargo xtask completions target/completions
 

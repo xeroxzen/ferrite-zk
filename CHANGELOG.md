@@ -7,6 +7,21 @@ crates share one version.
 
 ## [Unreleased]
 
+### zkteco-client
+
+- `demo_device` example: a stand-alone demo device on 127.0.0.1 with
+  fictional users and punches, and periodic dropped connections, to try
+  `zkctl` without hardware (`--port`, `--name`, `--interval`,
+  `--drop-every`, `--no-drops`, `--seed`).
+- The mock device moved from `tests/support` into the crate as
+  `zkteco_client::demo`, behind the `demo` feature: off by default, hidden
+  from the documentation, not part of the API.
+
+### Documentation
+
+- "Try it without hardware" in the README and guide, and a vhs tape
+  (`docs/demo/live.tape`) that records it.
+
 ## [0.1.0-alpha.1] - 2026-11-15
 
 First release. **Alpha, untested on physical devices**: everything is
