@@ -215,7 +215,7 @@ mod tests {
             Scrubber::new().user_table(&mut table, format);
             assert_eq!(table.len(), len);
             let batch = user::decode_table_as(&table, format, enc).unwrap();
-            assert!(batch.rejected.is_empty());
+            assert_eq!(batch.rejected, Vec::new());
             let got: Vec<_> = batch
                 .records
                 .iter()
@@ -252,7 +252,7 @@ mod tests {
             let mut table = attendance::encode_table(&[punch.clone(), punch.clone()], format, enc).unwrap();
             scrubber.attendance_table(&mut table, format);
             let batch = attendance::decode_table_as(&table, format, enc).unwrap();
-            assert!(batch.rejected.is_empty());
+            assert_eq!(batch.rejected, Vec::new());
             for (i, a) in batch.records.iter().enumerate() {
                 assert_eq!(a.user_id.as_deref(), Some("1"));
                 assert_eq!(a.uid, Some(Uid(1)));

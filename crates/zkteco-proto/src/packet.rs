@@ -86,12 +86,12 @@ pub fn checksum(bytes: &[u8]) -> u16 {
 /// even offset of the checksummed data.
 fn fold_sum(sum: u16, bytes: &[u8]) -> u16 {
     let mut acc = u32::from(sum);
-    let mut words = bytes.chunks_exact(2);
-    for w in &mut words {
-        acc += u32::from(u16::from_le_bytes([w[0], w[1]]));
+    let (words, remainder) = bytes.as_chunks::<2>();
+    for w in words {
+        acc += u32::from(u16::from_le_bytes(*w));
         acc = (acc & 0xFFFF) + (acc >> 16);
     }
-    if let [last] = words.remainder() {
+    if let [last] = remainder {
         acc += u32::from(*last);
         acc = (acc & 0xFFFF) + (acc >> 16);
     }

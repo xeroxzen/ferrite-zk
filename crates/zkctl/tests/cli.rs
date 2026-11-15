@@ -663,7 +663,7 @@ async fn clears_need_the_device_name() {
     ])
     .await
     .code(0);
-    assert!(dev.state().attendance.is_empty());
+    assert_eq!(dev.state().attendance, Vec::new());
     env.run(&[
         "-d",
         "lobby",
@@ -675,7 +675,7 @@ async fn clears_need_the_device_name() {
     ])
     .await
     .code(0);
-    assert!(dev.state().users.is_empty());
+    assert_eq!(dev.state().users, Vec::new());
 }
 
 #[tokio::test]
@@ -770,7 +770,7 @@ async fn templates_export_and_import() {
         .unwrap()
         .iter()
         .all(|p| p["payload_hex"].is_null()));
-    assert!(dev.state().saved_bulk.is_empty());
+    assert_eq!(dev.state().saved_bulk, Vec::<Vec<u8>>::new());
 
     let mut import = args(&host, &["templates", "import", file]);
     import.extend(flags);

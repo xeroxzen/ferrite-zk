@@ -427,9 +427,9 @@ async fn read_buffer_device_error_is_retried_then_reported() {
 async fn empty_device_reads_nothing() {
     let dev = device(DeviceState::default()).await;
     let mut client = Client::connect(dev.config()).await.unwrap();
-    assert!(client.users().await.unwrap().records.is_empty());
-    assert!(client.attendance().await.unwrap().records.is_empty());
-    assert!(client.templates().await.unwrap().records.is_empty());
+    assert_eq!(client.users().await.unwrap().records, Vec::new());
+    assert_eq!(client.attendance().await.unwrap().records, Vec::new());
+    assert_eq!(client.templates().await.unwrap().records, Vec::new());
     assert_eq!(dev.count(Command::PrepareBuffer), 0);
 }
 
@@ -500,7 +500,7 @@ async fn delete_templates() {
         .delete_user_template_by_user_id(&"nobody".into(), 3)
         .await
         .unwrap());
-    assert!(dev.state().templates.is_empty());
+    assert_eq!(dev.state().templates, Vec::new());
 }
 
 #[tokio::test]
@@ -663,7 +663,7 @@ async fn control_commands() {
     client.cancel_capture().await.unwrap();
     client.verify_user().await.unwrap();
     client.clear_attendance().await.unwrap();
-    assert!(dev.state().attendance.is_empty());
+    assert_eq!(dev.state().attendance, Vec::new());
     client.restart().await.unwrap();
     assert_eq!(dev.commands().last(), Some(&Command::Restart));
 }
@@ -763,7 +763,7 @@ async fn events_during_chunked_read_are_all_kept() {
     let want: Vec<String> = (1..=sent).map(|i| i.to_string()).collect();
     assert_eq!(event_ids(&events), want, "all events, oldest first");
     assert_eq!(client.dropped_events(), 0);
-    assert!(client.take_pending_events().is_empty());
+    assert_eq!(client.take_pending_events(), Vec::new());
     let acks = dev
         .state()
         .log

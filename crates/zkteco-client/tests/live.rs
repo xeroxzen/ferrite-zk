@@ -69,7 +69,7 @@ async fn subscribes_streams_and_stops() {
     result.unwrap();
     assert_eq!(dev.state().event_masks, [EventFlags::ATTLOG.bits(), 0]);
     assert_eq!(dev.count(Command::AckOk), 3, "every event acknowledged");
-    assert!(client.take_pending_events().is_empty());
+    assert_eq!(client.take_pending_events(), Vec::new());
     client.firmware_version().await.unwrap();
 }
 

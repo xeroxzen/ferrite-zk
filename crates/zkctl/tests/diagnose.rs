@@ -48,7 +48,7 @@ async fn report_is_a_compatibility_row() {
     assert_eq!(r.row.attendance_record, "40");
     assert_eq!(r.row.reply_ids, "echoed");
     assert_eq!(r.row.transport, "tcp+udp");
-    assert!(r.row.verified_by.is_empty());
+    assert_eq!(r.row.verified_by, "");
     assert_eq!(r.device.connected_over, "tcp");
     assert_eq!(
         (r.device.serial_number.as_str(), r.device.mac.as_str()),
@@ -93,7 +93,7 @@ async fn identifiers_only_on_request() {
     };
     let outcome = diagnose::run(&opts).await.unwrap();
     assert_eq!(outcome.report.device.serial_number, "MOCK0000000001");
-    assert!(outcome.captures.is_empty());
+    assert_eq!(outcome.captures, Vec::new());
 }
 
 /// Every packet of a capture, decoded with checksums enforced.

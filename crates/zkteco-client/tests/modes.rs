@@ -111,7 +111,7 @@ async fn dry_run_sends_no_writes_but_records_them() {
         planned,
         [Command::DeleteUser, Command::RefreshData, Command::ClearAttLog]
     );
-    assert!(client.take_planned().is_empty());
+    assert_eq!(client.take_planned(), Vec::new());
     for sent in dev.commands() {
         assert!(
             zkteco_client::READ_ONLY_COMMANDS.contains(&sent),
