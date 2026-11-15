@@ -19,7 +19,7 @@ hardware = []
 # The mock device (`zkteco_client::demo`, hidden from the documentation):
 # for this workspace's tests and the `demo_device` example. Not part of the
 # API; may change in any release.
-demo = ["tokio/rt", "tokio/sync"]
+demo = ["tokio/rt", "tokio/sync", "tokio/macros"]
 
 [dependencies]
 bytes.workspace = true
