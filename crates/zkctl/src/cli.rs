@@ -308,7 +308,8 @@ pub struct PullArgs {
     /// Only records before this time (same forms as `--since`).
     #[arg(long)]
     pub until: Option<String>,
-    /// Fill in user IDs from the user table for records that lack them.
+    /// Show user IDs from the user table for records that lack them (they
+    /// are looked up for `id` either way).
     #[arg(long)]
     pub with_users: bool,
     /// Cursor file: emit only records after those emitted by the previous

@@ -1,12 +1,13 @@
 ---
 source: crates/zkctl/tests/cli.rs
+assertion_line: 313
 expression: records
 ---
 [
   {
     "device": "[host]",
     "device_time": "2026-01-01T08:00:00",
-    "id": "778d1bc37faacca38f6a882c2e595be2",
+    "id": "70e6390bd4297d7cb03aca8edede14d5",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -23,7 +24,7 @@ expression: records
   {
     "device": "[host]",
     "device_time": "2026-01-01T08:01:00",
-    "id": "ff2706987a5d265c94bda32c681ac710",
+    "id": "f1dd18a50bde770fd7f40c60fd6f2345",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -40,7 +41,7 @@ expression: records
   {
     "device": "[host]",
     "device_time": "2026-01-01T08:02:00",
-    "id": "93e48f299df8d3a4c2b2d85167dcc355",
+    "id": "fb2e438023e6639edf9a24f3318d5d1b",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -57,7 +58,7 @@ expression: records
   {
     "device": "[host]",
     "device_time": "2026-01-01T08:03:00",
-    "id": "654bfc092e504af2d9aa02e98188d796",
+    "id": "4b0373b18fe5472176fe5a0cdb350af5",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,

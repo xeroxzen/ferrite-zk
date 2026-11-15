@@ -11,8 +11,10 @@ use serde_json::Value;
 use support::{event_with, DeviceState, MockDevice};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command as Process};
+use zkctl::event_id::{self, DeviceKey};
 use zkteco_client::READ_ONLY_COMMANDS;
-use zkteco_proto::{Command, EventFlags};
+use zkteco_proto::records::attendance::AttendanceFormat;
+use zkteco_proto::{Command, EventFlags, UserId};
 
 fn zkctl(config: &std::path::Path, args: &[String]) -> Child {
     Process::new(env!("CARGO_BIN_EXE_zkctl"))
@@ -464,5 +466,91 @@ async fn the_same_punch_has_one_id_however_it_arrives() {
     for e in [l, b, p] {
         assert_eq!(e["user_id_source"], "record");
         assert_event_schema(e);
+    }
+}
+
+/// A config file with one profile, `name`, for `dev`.
+fn profile_config(dir: &std::path::Path, name: &str, dev: &MockDevice) -> std::path::PathBuf {
+    let config = dir.join("c.toml");
+    let text = format!(
+        "[devices.{name}]\nhost = \"{}\"\nport = {}\ntransport = \"tcp\"\ntimeout = \"500ms\"\n",
+        dev.addr.ip(),
+        dev.addr.port()
+    );
+    std::fs::write(&config, text).unwrap();
+    config
+}
+
+/// On a log without user IDs (the 8-byte layout), a plain `attendance
+/// pull` and `live` give the same punch the same `id`: pull resolves the
+/// user ID for the id, though it shows it only with `--with-users`.
+#[tokio::test]
+async fn pull_and_live_agree_on_a_log_without_user_ids() {
+    let mut state = DeviceState {
+        attendance_format: AttendanceFormat::Short8,
+        ..DeviceState::default()
+    };
+    state.events_sent = 1;
+    let punch = state.last_event_record();
+    state.events_sent = 0;
+    state.attendance = vec![punch.clone()];
+    state.users = support::users(1);
+    state.users[0].user_id = punch.user_id.clone().unwrap();
+    let dev = MockDevice::start(state).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = profile_config(dir.path(), "front", &dev);
+
+    let pull = strings(&["attendance", "pull", "-d", "front", "--output", "ndjson"]);
+    let (pulled, code, stderr) = finish(zkctl(&config, &pull)).await;
+    assert_eq!((pulled.len(), code), (1, 0), "{stderr}");
+    assert_eq!(
+        (&pulled[0]["user_id"], &pulled[0]["user_id_source"]),
+        (&Value::Null, &Value::Null),
+        "shown only with --with-users"
+    );
+
+    let live = strings(&["live", "-d", "front", "--output", "ndjson", "--count", "1"]);
+    let child = zkctl(&config, &live);
+    subscribed(&dev, 1).await;
+    dev.push_events(1);
+    let (lines, code, stderr) = finish(child).await;
+    assert_eq!((lines.len(), code), (1, 0), "{stderr}");
+    assert_eq!(lines[0]["user_id"], "1");
+    assert_eq!(lines[0]["device_time"], pulled[0]["device_time"]);
+    assert_eq!(lines[0]["id"], pulled[0]["id"]);
+    let key = DeviceKey::serial("MOCK0000000001");
+    assert_eq!(lines[0]["id"], event_id::attendance(&key, &punch));
+}
+
+/// The serial number cannot be read (an error, or an empty value): the
+/// key falls back to `profile:<name>` with a warning, and the stream goes
+/// on.
+#[tokio::test]
+async fn live_ids_fall_back_to_the_profile_name() {
+    for empty in [false, true] {
+        let dev = MockDevice::start(DeviceState::default()).await;
+        {
+            let mut state = dev.state();
+            state.faults.serial_number_error = !empty;
+            state.faults.empty_serial_number = empty;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_config(dir.path(), "front", &dev);
+        let args = strings(&["live", "-d", "front", "--output", "ndjson", "--count", "2"]);
+        let child = zkctl(&config, &args);
+        subscribed(&dev, 1).await;
+        dev.push_events(2);
+        let (lines, code, stderr) = finish(child).await;
+        assert_eq!((lines.len(), code), (2, 0), "empty: {empty}: {stderr}");
+        let key = DeviceKey::profile("front");
+        for (n, line) in (1u32..).zip(&lines) {
+            let mut punch = dev.state().last_event_record();
+            punch.user_id = Some(UserId(n.to_string()));
+            assert_eq!(line["id"], event_id::attendance(&key, &punch), "empty: {empty}");
+        }
+        assert!(
+            stderr.contains("warning: front: cannot read the serial number"),
+            "empty: {empty}: {stderr}"
+        );
     }
 }

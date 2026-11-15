@@ -10,6 +10,7 @@ use zkteco_client::{Attendance, Client, UserIdSource};
 use super::cursor::{self, Cursor};
 use crate::cli::{AttendanceCommand, ClearArgs, Format, Global, PullArgs};
 use crate::duration::parse_duration;
+use crate::event_id::DeviceKey;
 use crate::exit::{classify, Exit, Fail};
 use crate::output::{self, EventOut};
 use crate::target::{self, Access, Target};
@@ -40,6 +41,8 @@ fn parse_bound(text: &str) -> Result<Bound> {
 
 /// One device's records.
 struct Pulled {
+    /// What identifies the device in event ids.
+    key: DeviceKey,
     records: Vec<Attendance>,
     /// Where each record's user ID came from, by index.
     sources: Vec<UserIdSource>,
@@ -56,8 +59,8 @@ async fn pull(g: &Global, args: &PullArgs) -> Result<Exit> {
     let mut state = args.state.as_deref().map(cursor::load).transpose()?;
     let mut tasks = tokio::task::JoinSet::new();
     for (i, t) in targets.iter().enumerate() {
-        let (t, with_users) = (t.clone(), args.with_users);
-        tasks.spawn(async move { (i, read(&t, with_users, relative).await) });
+        let t = t.clone();
+        tasks.spawn(async move { (i, read(&t, relative).await) });
     }
     let mut results: Vec<Option<Result<Pulled>>> = (0..targets.len()).map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
@@ -70,7 +73,7 @@ async fn pull(g: &Global, args: &PullArgs) -> Result<Exit> {
         match result.context("missing device result")? {
             Ok(pulled) => {
                 let cursor = state.as_ref().and_then(|s| s.devices.get(&t.name));
-                let (records, last) = select(&pulled, cursor, since, until, &t.name);
+                let (records, last) = select(&pulled, cursor, since, until, &t.name, args.with_users);
                 exit = exit.worst(report_rejected(&t.name, "attendance", &pulled.rejected));
                 if let (Some(state), Some(last)) = (state.as_mut(), last) {
                     state.devices.insert(t.name.clone(), last);
@@ -90,9 +93,10 @@ async fn pull(g: &Global, args: &PullArgs) -> Result<Exit> {
     Ok(exit)
 }
 
-async fn read(t: &Target, with_users: bool, relative: bool) -> Result<Pulled> {
+async fn read(t: &Target, relative: bool) -> Result<Pulled> {
     let mut client = target::connect(t, Access::ReadOnly).await?;
-    let pulled = read_from(&mut client, with_users, relative)
+    let key = DeviceKey::read(&mut client, &t.name).await;
+    let pulled = read_from(&mut client, key, relative)
         .await
         .with_context(|| format!("reading attendance from {}", t.name))?;
     if let Err(e) = client.disconnect().await {
@@ -101,35 +105,21 @@ async fn read(t: &Target, with_users: bool, relative: bool) -> Result<Pulled> {
     Ok(pulled)
 }
 
-async fn read_from(client: &mut Client, with_users: bool, relative: bool) -> zkteco_client::Result<Pulled> {
+/// Records are always resolved against the user table, which is read only
+/// when some record lacks a user ID, so that `id` names the person the
+/// way live events do (DECISIONS.md D36). `--with-users` decides only
+/// whether the resolved user IDs are shown ([`select`]).
+async fn read_from(client: &mut Client, key: DeviceKey, relative: bool) -> zkteco_client::Result<Pulled> {
     let now = if relative {
         Some(client.time().await?)
     } else {
         None
     };
-    if with_users {
-        let batch = client.attendance_with_users().await?;
-        return Ok(Pulled {
-            sources: batch.records.iter().map(|r| r.source).collect(),
-            records: batch.records.into_iter().map(|r| r.record).collect(),
-            rejected: batch.rejected,
-            now,
-        });
-    }
-    let batch = client.attendance().await?;
+    let batch = client.attendance_with_users().await?;
     Ok(Pulled {
-        sources: batch
-            .records
-            .iter()
-            .map(|a| {
-                if a.user_id.is_some() {
-                    UserIdSource::Record
-                } else {
-                    UserIdSource::Unresolved
-                }
-            })
-            .collect(),
-        records: batch.records,
+        key,
+        sources: batch.records.iter().map(|r| r.source).collect(),
+        records: batch.records.into_iter().map(|r| r.record).collect(),
         rejected: batch.rejected,
         now,
     })
@@ -142,6 +132,7 @@ fn select(
     since: Option<Bound>,
     until: Option<Bound>,
     device: &str,
+    with_users: bool,
 ) -> (Vec<EventOut>, Option<Cursor>) {
     let resolve = |b: Bound| match b {
         Bound::At(t) => Some(t),
@@ -160,7 +151,12 @@ fn select(
             continue;
         }
         last = Some(Cursor::of(a));
-        out.push(EventOut::pulled(device, a, pulled.sources[i]));
+        let event = EventOut::pulled(device, &pulled.key, a, pulled.sources[i]);
+        out.push(if with_users {
+            event
+        } else {
+            event.without_resolved_user_id()
+        });
     }
     (out, last)
 }

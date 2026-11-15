@@ -1,12 +1,13 @@
 ---
 source: crates/zkctl/tests/live.rs
+assertion_line: 133
 expression: lines
 ---
 [
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
-    "id": "a5fb84bd35dd233800383eef55f43159",
+    "id": "4dc9a02a50280d91c6092ef873abeff0",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -23,7 +24,7 @@ expression: lines
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
-    "id": "223e4b2599a9ec3da812f8983e00889f",
+    "id": "9d18eb240d1d4707439a06caa6312569",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -40,7 +41,7 @@ expression: lines
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
-    "id": "bc39fe566c9a6235effcbe725de8dd1f",
+    "id": "6ec6f3d3392a47627cbf5aa37f2e2dcc",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,

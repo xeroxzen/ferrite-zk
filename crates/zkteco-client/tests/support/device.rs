@@ -70,6 +70,10 @@ pub struct Faults {
     /// transit). `Some(0)` with a single `Data` packet swaps it with the
     /// closing `AckOk`.
     pub reorder_stream_once: Option<usize>,
+    /// Reply `AckError` to every read of `~SerialNumber`.
+    pub serial_number_error: bool,
+    /// Answer every read of `~SerialNumber` with an empty value.
+    pub empty_serial_number: bool,
 }
 
 impl Default for Faults {
@@ -92,6 +96,8 @@ impl Default for Faults {
             lose_stream_tail_once: false,
             duplicate_data_packet_once: None,
             reorder_stream_once: None,
+            serial_number_error: false,
+            empty_serial_number: false,
         }
     }
 }
@@ -614,6 +620,14 @@ impl DeviceState {
 
     fn read_option(&self, p: &[u8]) -> Vec<(Command, u16, Vec<u8>)> {
         let key = requests::decode_cstring(p);
+        if key == "~SerialNumber" {
+            if self.faults.serial_number_error {
+                return self.reply(Command::AckError);
+            }
+            if self.faults.empty_serial_number {
+                return self.ok(options::encode_reply(&key, ""));
+            }
+        }
         match self.options.iter().rev().find(|(k, _)| *k == key) {
             Some((k, v)) => self.ok(options::encode_reply(k, v)),
             None => self.reply(Command::AckError),

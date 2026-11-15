@@ -60,7 +60,10 @@ tested against a mock device only.
   `ZK_PASSWORD`, the OS keyring or a prompt, never the file.
 - Output as text, JSON or NDJSON. Attendance records and live events share
   one versioned schema (`docs/schema/event-v1.json`), including a
-  deterministic `id` to deduplicate on and `user_id_source`. Documented
+  deterministic `id` to deduplicate on (keyed on the device's serial
+  number, so it survives renaming a profile; on logs without user IDs,
+  `attendance pull` reads the user table so ids match live) and
+  `user_id_source`. Documented
   exit codes.
 - State, cursor and export files are written atomically and durably, with
   mode 0600.

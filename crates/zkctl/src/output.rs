@@ -9,7 +9,7 @@ use serde::Serialize;
 use zkteco_client::zkteco_proto::packet::Packet;
 use zkteco_client::{Attendance, CapturedEvent, LiveEvent, Privilege, Source, User, UserIdSource};
 
-use crate::event_id;
+use crate::event_id::{self, DeviceKey};
 use zkteco_proto::records::attendance::{AttendanceStatus, Punch};
 
 use crate::cli::Format;
@@ -134,16 +134,16 @@ pub struct RawOut {
 }
 
 impl EventOut {
-    /// A record read by `attendance pull`, with where its user ID came
-    /// from.
+    /// A record read by `attendance pull` from `device` (identified by
+    /// `key`), with where its user ID came from.
     #[must_use]
-    pub fn pulled(device: &str, a: &Attendance, user_id_source: UserIdSource) -> Self {
-        Self::attendance(device, "pull", None, a, user_id_source)
+    pub fn pulled(device: &str, key: &DeviceKey, a: &Attendance, user_id_source: UserIdSource) -> Self {
+        Self::attendance(device, key, "pull", None, a, user_id_source)
     }
 
-    /// An event from `live`.
+    /// An event from `live`, from `device` (identified by `key`).
     #[must_use]
-    pub fn captured(device: &str, e: &CapturedEvent) -> Self {
+    pub fn captured(device: &str, key: &DeviceKey, e: &CapturedEvent) -> Self {
         let source = match e.source {
             Source::Live => "live",
             Source::Backfill => "backfill",
@@ -152,11 +152,11 @@ impl EventOut {
         match &e.event {
             LiveEvent::Attendance(a) => {
                 let user_id_source = e.user_id_source.unwrap_or(UserIdSource::Unresolved);
-                Self::attendance(device, source, received_at, a, user_id_source)
+                Self::attendance(device, key, source, received_at, a, user_id_source)
             }
             LiveEvent::Raw { flag, payload } => Self {
                 v: SCHEMA_VERSION,
-                id: event_id::raw(device, flag.bits(), payload),
+                id: event_id::raw(key, flag.bits(), payload),
                 device: device.to_owned(),
                 source,
                 device_time: None,
@@ -178,8 +178,22 @@ impl EventOut {
         }
     }
 
+    /// The same event with a user ID that came from the user table left
+    /// out, as if unresolved. `id` is unchanged: it is computed from the
+    /// resolved person, so it matches live events (`attendance pull`
+    /// without `--with-users`).
+    #[must_use]
+    pub fn without_resolved_user_id(mut self) -> Self {
+        if self.user_id_source == Some("user_table") {
+            self.user_id = None;
+            self.user_id_source = None;
+        }
+        self
+    }
+
     fn attendance(
         device: &str,
+        key: &DeviceKey,
         source: &'static str,
         received_at: Option<String>,
         a: &Attendance,
@@ -187,7 +201,7 @@ impl EventOut {
     ) -> Self {
         Self {
             v: SCHEMA_VERSION,
-            id: event_id::attendance(device, a),
+            id: event_id::attendance(key, a),
             device: device.to_owned(),
             source,
             device_time: Some(device_time(a.timestamp)),

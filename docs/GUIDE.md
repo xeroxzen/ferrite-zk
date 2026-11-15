@@ -141,7 +141,7 @@ zkctl -d front live --reconnect --backfill --state /var/lib/zkctl/live.json \
 ```
 
 ```json
-{"v":1,"id":"28ae83f83bc20808c3d10e07af928880","device":"front","source":"live","device_time":"2026-01-02T03:04:05","received_at":"2026-01-02T03:04:05.120Z","kind":"attendance","uid":7,"user_id":"1001","user_id_source":"record","status":"fingerprint","status_code":1,"punch":"check_in","punch_code":0,"workcode":null}
+{"v":1,"id":"ff4c21a7a3b3bc43f22e41caef023d77","device":"front","source":"live","device_time":"2026-01-02T03:04:05","received_at":"2026-01-02T03:04:05.120Z","kind":"attendance","uid":7,"user_id":"1001","user_id_source":"record","status":"fingerprint","status_code":1,"punch":"check_in","punch_code":0,"workcode":null}
 ```
 
 Each line is one event in the [event schema](#the-event-schema). `source`
@@ -271,6 +271,13 @@ null; for `raw` they are. Which of `uid` and `user_id` a record carries
 depends on the device's layout; `--with-users` fills in the other from the
 user table.
 
+On a log layout without user IDs (8 bytes), `attendance pull` reads the user
+table even without `--with-users`: one extra table read per device per run,
+the same read `--with-users` makes, so that `id` names the person by user ID
+as live events do. Without `--with-users` the user IDs found this way are
+used only for `id`; `user_id` and `user_id_source` stay null. On layouts
+whose records carry user IDs, no extra read is made.
+
 Compatibility: a field may be added without changing `v`, so ignore keys
 you do not know. Removing or renaming a field, or changing its type or
 meaning, would be version 2, with a new schema file. `--output json`
@@ -292,16 +299,23 @@ What goes into `id`, so you can recompute it: the first 16 bytes of
 SHA-256, as lowercase hex, over a sequence of fields, each preceded by its
 length as an 8-byte big-endian integer.
 
-- `kind: attendance`: `zkctl-event-v1`, `attendance`, `device`,
+- `kind: attendance`: `zkctl-event-v1`, `attendance`, the device key,
   `device_time`, the person (`user_id:` and the user ID if there is one,
   otherwise `uid:` and the uid, otherwise empty), the status code as one
   byte, the punch code as one byte.
-- `kind: raw`: `zkctl-event-v1`, `raw`, `device`, the flags as a 4-byte
-  big-endian integer, the payload bytes.
+- `kind: raw`: `zkctl-event-v1`, `raw`, the device key, the flags as a
+  4-byte big-endian integer, the payload bytes.
 
-For example, user ID `1001` at `2026-01-02T03:04:05` on device `front`,
-fingerprint (1), check-in (0), is `28ae83f83bc20808c3d10e07af928880`, with
-or without a uid.
+The device key is `serial:` and the device's serial number, so renaming a
+profile, or reaching one device through two profiles or by host, keeps its
+ids. It is not in the output: run `zkctl -d <device> info` to see the
+serial number. If the serial number cannot be read, `zkctl` warns and uses
+`profile:` and the profile name (or host) instead; those ids change if the
+profile is renamed.
+
+For example, user ID `1001` at `2026-01-02T03:04:05` on the device with
+serial number `A`, fingerprint (1), check-in (0), is
+`ff4c21a7a3b3bc43f22e41caef023d77`, with or without a uid.
 
 Limits, because the device log has no identifier of its own:
 
@@ -311,12 +325,15 @@ Limits, because the device log has no identifier of its own:
   `live` emits them once, and deduplicating on `id` keeps one. Two different
   people, methods or punch states in the same second get different ids.
 - **The person must be named the same way.** When a user ID is known it is
-  used, and the uid ignored, because live events on some layouts carry only
-  the user ID. A log layout without user IDs (8 bytes) names the person by
-  uid unless `--with-users` fills the user ID in, so pull such devices with
-  `--with-users` (and run `live --with-users`) to get matching ids.
-- **`device` is part of it.** Renaming a profile, or switching between
-  `-d NAME` and `--host`, changes every id for that device.
+  used, and the uid ignored, because live events carry only the user ID.
+  On a log without user IDs, pull and backfill look the user ID up by uid
+  (above). A punch whose uid is no longer in the user table (the user was
+  deleted) is named by uid in the log, so it gets a different `id` there
+  than the live event did.
+- **The device is part of it, by serial number.** Renaming a profile, or
+  switching between profiles and `--host` for one device, keeps its ids.
+  When the serial number cannot be read, the ids use the profile name (or
+  host) and change with it; `zkctl` warns when that happens.
 - Raw events with the same flags and payload from one device share an
   `id`.
 

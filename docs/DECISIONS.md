@@ -660,7 +660,8 @@ list.
   objects exactly the listed shape.
 - `user_id_source` is on every object: `record`, `user_table`, or null
   (unresolved, and raw events). Pull without `--with-users` reports
-  `record` when the record has a user ID. For live events the client now
+  `record` when the record has a user ID, and hides user IDs it resolved
+  from the user table (it resolves them anyway, for `id`; D36). For live events the client now
   says where the ID came from (`CapturedEvent::user_id_source`): the event,
   the user table (`resolve_users`, or backfill's read, which always
   resolves), or nowhere. (It was briefly dropped in review and restored
@@ -705,7 +706,7 @@ list.
 
 - `id` is the first 16 bytes of SHA-256 (lowercase hex) over
   length-prefixed fields (8-byte big-endian lengths, so field boundaries
-  cannot shift): `zkctl-event-v1`, the kind, the device, then for
+  cannot shift): `zkctl-event-v1`, the kind, the device key, then for
   attendance the device time, the person, the status code and the punch
   code; for raw events the flags (4 bytes) and the payload. The exact
   encoding is in docs/GUIDE.md and `zkctl::event_id`, with a pinned test
@@ -713,9 +714,23 @@ list.
 - The person is `user_id:<id>` when a user ID is known, else `uid:<n>`.
   Hashing both, as first specified, would give one punch two ids: live
   events in the 12-byte layout carry only the user ID, the log carries
-  both. This matches the live duplicate filter's key (D31). A log layout
-  with no user ID names the person by uid unless `--with-users` resolves
-  it; the guide tells users to resolve on such devices.
+  both. This matches the live duplicate filter's key (D31). Every live
+  event layout carries the user ID, and backfill always resolves, so
+  `attendance pull` resolves too, with or without `--with-users`: on a log
+  layout with no user ID that costs one user-table read per device per run
+  (none on other layouts), and `--with-users` only decides whether the
+  resolved user ID is shown. The alternative, telling users to pass
+  `--with-users` everywhere, left default pulls with ids that never matched
+  live. A uid missing from the user table is still named by uid.
+- The device key is `serial:<serial number>`, read when `zkctl` connects,
+  not the profile name: as first specified, renaming a profile, or
+  reaching one device through two profiles or by host, changed every id
+  and defeated dedup across them. If the serial number cannot be read (or
+  is empty) the key is `profile:<name>`, with a warning on stderr; the
+  prefixes keep the two from colliding. `device` in the output stays the
+  profile name, for people. Reading it costs one option read per
+  connection; `live` reads it on the connection it subscribes on, before
+  subscribing, and keeps it across reconnects to the same target.
 - `user_id_source`, `uid`, `workcode`, `source` and arrival time are not
   in the hash: they describe how the punch was read, not which punch it
   is.

@@ -14,6 +14,7 @@ use std::process::Output;
 use assert_cmd::assert::Assert;
 use serde_json::Value;
 use support::{punches, templates, users, DeviceState, MockDevice};
+use zkctl::event_id::{self, DeviceKey};
 use zkteco_client::READ_ONLY_COMMANDS;
 use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::Command;
@@ -404,7 +405,8 @@ async fn attendance_pull_reports_rejected_records() {
 }
 
 /// A log without user IDs (the 8-byte layout): `--with-users` fills them in
-/// from the user table and says so; without it they stay null.
+/// from the user table and says so; without it they stay null. Either way
+/// the user table is read and `id` names the person by user ID.
 #[tokio::test]
 async fn user_id_source_shows_where_ids_came_from() {
     let env = Env::new();
@@ -430,9 +432,9 @@ async fn user_id_source_shows_where_ids_came_from() {
     let resolved = &lines(&a)[0];
     assert_eq!(resolved["user_id"], "1001");
     assert_eq!(resolved["user_id_source"], "user_table");
-    assert_ne!(
+    assert_eq!(
         plain["id"], resolved["id"],
-        "the person is a uid in one, a user ID in the other"
+        "the id is computed from the resolved user ID in both"
     );
     assert_event_schema(plain);
     assert_event_schema(resolved);
@@ -777,6 +779,74 @@ async fn templates_export_and_import() {
 }
 
 // ---- device profiles ----
+
+/// The `id`s of a plain `attendance pull`, with these selection arguments.
+async fn pulled_ids(env: &Env, select: &[&str]) -> Vec<Value> {
+    let mut a = vec!["attendance", "pull", "--output", "ndjson"];
+    a.extend_from_slice(select);
+    let out = env.run(&a).await.code(0);
+    lines(&out).iter().map(|r| r["id"].clone()).collect()
+}
+
+/// `id` follows the device's serial number, not the profile name: renaming
+/// a profile keeps the ids, and two profiles (or `--host`) reaching the
+/// same device give the same ids.
+#[tokio::test]
+async fn ids_follow_the_device_not_the_profile() {
+    let env = Env::new();
+    let dev = device().await;
+    env.devices(&[("front", &dev)]);
+    let before = pulled_ids(&env, &["-d", "front"]).await;
+    assert_eq!(before.len(), 4);
+    env.devices(&[("lobby", &dev)]);
+    assert_eq!(pulled_ids(&env, &["-d", "lobby"]).await, before, "renamed");
+
+    env.devices(&[("front", &dev), ("lobby", &dev)]);
+    let both = pulled_ids(&env, &["-d", "front", "-d", "lobby"]).await;
+    assert_eq!(both[..4], before[..], "front");
+    assert_eq!(both[4..], before[..], "lobby");
+    let host = at(&dev);
+    let mut by_host = vec!["attendance", "pull", "--output", "ndjson"];
+    by_host.extend(host.iter().map(String::as_str));
+    let out = env.run(&by_host).await.code(0);
+    let ids: Vec<Value> = lines(&out).iter().map(|r| r["id"].clone()).collect();
+    assert_eq!(ids, before, "by host");
+}
+
+/// The serial number cannot be read (an error, or an empty value): the
+/// key falls back to `profile:<name>` with a warning, and the pull still
+/// succeeds.
+#[tokio::test]
+async fn ids_fall_back_to_the_profile_name() {
+    for empty in [false, true] {
+        let env = Env::new();
+        let dev = device().await;
+        {
+            let mut state = dev.state();
+            state.faults.serial_number_error = !empty;
+            state.faults.empty_serial_number = empty;
+        }
+        env.devices(&[("front", &dev)]);
+        let a = env
+            .run(&["attendance", "pull", "-d", "front", "--output", "ndjson"])
+            .await
+            .code(0);
+        let records = lines(&a);
+        assert_eq!(records.len(), 4, "empty: {empty}");
+        let key = DeviceKey::profile("front");
+        let expected: Vec<String> = punches(4).iter().map(|p| event_id::attendance(&key, p)).collect();
+        let ids: Vec<&str> = records.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, expected, "empty: {empty}");
+        let err = stderr(&a);
+        assert!(
+            err.contains("warning: front: cannot read the serial number"),
+            "empty: {empty}: {err}"
+        );
+        if empty {
+            assert!(err.contains("returned an empty one"), "{err}");
+        }
+    }
+}
 
 #[tokio::test]
 async fn device_profiles() {

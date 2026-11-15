@@ -12,11 +12,12 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
-use zkteco_client::{CaptureOptions, CapturedEvent, LiveCapture, LiveEvent, ReconnectPolicy, Resume};
+use zkteco_client::{CaptureOptions, CapturedEvent, Client, LiveCapture, LiveEvent, ReconnectPolicy, Resume};
 
 use super::live_state::LiveState;
 
 use crate::cli::{Format, Global, LiveArgs};
+use crate::event_id::DeviceKey;
 use crate::exit::{classify, Exit, Fail};
 use crate::output::{self, EventOut};
 use crate::target::{self, Access, Target};
@@ -25,7 +26,8 @@ use crate::target::{self, Access, Target};
 const CHANNEL: usize = 4096;
 
 enum Msg {
-    Event(String, CapturedEvent),
+    /// An event, with the device's name and its key for event ids.
+    Event(String, DeviceKey, CapturedEvent),
     /// A device task finished, with its outcome.
     Ended(String, Exit),
 }
@@ -128,12 +130,12 @@ impl Printer<'_> {
 
     /// Emit one event, unless the limit was already reached. `true` when
     /// this event reached the limit.
-    fn event(&mut self, device: &str, event: &CapturedEvent) -> Result<bool> {
+    fn event(&mut self, device: &str, key: &DeviceKey, event: &CapturedEvent) -> Result<bool> {
         if self.limit_reached() {
             self.unemitted += 1;
             return Ok(false);
         }
-        print(self.format, device, event)?;
+        print(self.format, device, key, event)?;
         self.printed += 1;
         if let (Some(saved), LiveEvent::Attendance(a)) = (self.saved.as_mut(), &event.event) {
             saved.dirty |= saved.state.record(device, a);
@@ -188,8 +190,8 @@ async fn print_until_done(
                     tracing::info!(device = name, ?outcome, "device stream ended");
                     exit = exit.worst(outcome);
                 }
-                Some(Msg::Event(name, event)) => {
-                    if printer.event(&name, &event)? && !stopping {
+                Some(Msg::Event(name, key, event)) => {
+                    if printer.event(&name, &key, &event)? && !stopping {
                         stopping = true;
                         stop.send_replace(true);
                     }
@@ -214,8 +216,8 @@ async fn print_until_done(
     }
 }
 
-fn print(format: Format, device: &str, event: &CapturedEvent) -> Result<()> {
-    let out = EventOut::captured(device, event);
+fn print(format: Format, device: &str, key: &DeviceKey, event: &CapturedEvent) -> Result<()> {
+    let out = EventOut::captured(device, key, event);
     if format == Format::Ndjson {
         return output::ndjson(&out);
     }
@@ -258,7 +260,7 @@ async fn device(
     mut stop: watch::Receiver<bool>,
 ) {
     let config = target::config_for(&t, Access::Live).await;
-    let Some(mut capture) = subscribe(&t, reconnect, config, opts, &tx, &mut stop).await else {
+    let Some((mut capture, key)) = subscribe(&t, reconnect, config, opts, &tx, &mut stop).await else {
         return;
     };
     tracing::info!(device = t.name, "subscribed");
@@ -269,7 +271,7 @@ async fn device(
         tokio::select! {
             item = capture.next() => match item {
                 Some(Ok(event)) => {
-                    if tx.send(Msg::Event(t.name.clone(), event)).await.is_err() {
+                    if tx.send(Msg::Event(t.name.clone(), key.clone(), event)).await.is_err() {
                         break;
                     }
                 }
@@ -289,11 +291,12 @@ async fn device(
             }
         }
     }
-    finish(&t, capture, &tx, outcome).await;
+    finish(&t, &key, capture, &tx, outcome).await;
 }
 
-/// The first subscription. With `--reconnect`, failures are retried with
-/// backoff until it works or the command stops.
+/// The first subscription, and the device's key for event ids, read on the
+/// same connection. With `--reconnect`, failures are retried with backoff
+/// until it works or the command stops.
 async fn subscribe(
     t: &Target,
     reconnect: bool,
@@ -301,20 +304,20 @@ async fn subscribe(
     opts: CaptureOptions,
     tx: &mpsc::Sender<Msg>,
     stop: &mut watch::Receiver<bool>,
-) -> Option<LiveCapture> {
+) -> Option<(LiveCapture, DeviceKey)> {
     let policy = ReconnectPolicy::default();
     // Bounded by `--reconnect` (one attempt without it) and by the stop
     // signal; with it, retries go on until either succeeds.
     for failures in 0u32.. {
         let attempt = tokio::select! {
-            r = LiveCapture::connect(config.clone(), opts.clone()) => r,
+            r = connect(t, config.clone(), opts.clone()) => r,
             _ = stop.changed() => {
                 ended(tx, &t.name, Exit::Ok).await;
                 return None;
             }
         };
         match attempt {
-            Ok(capture) => return Some(capture),
+            Ok(subscribed) => return Some(subscribed),
             Err(e) => {
                 let e = anyhow::Error::from(e).context(format!("subscribing to {}", t.name));
                 eprintln!("error: {e:#}");
@@ -336,15 +339,30 @@ async fn subscribe(
     None
 }
 
+/// Connect, read the device key, subscribe.
+async fn connect(
+    t: &Target,
+    config: zkteco_client::ClientConfig,
+    opts: CaptureOptions,
+) -> zkteco_client::Result<(LiveCapture, DeviceKey)> {
+    let mut client = Client::connect(config).await?;
+    let key = DeviceKey::read(&mut client, &t.name).await;
+    Ok((client.live_capture(opts).await?, key))
+}
+
 /// Unsubscribe, pass on events that arrived meanwhile, disconnect.
-async fn finish(t: &Target, capture: LiveCapture, tx: &mpsc::Sender<Msg>, outcome: Exit) {
+async fn finish(t: &Target, key: &DeviceKey, capture: LiveCapture, tx: &mpsc::Sender<Msg>, outcome: Exit) {
     let stats = capture.stats();
     let (mut client, result) = capture.stop().await;
     if let Err(e) = result {
         eprintln!("warning: {}: unsubscribing: {e}", t.name);
     }
     for captured in client.take_pending_captured() {
-        if tx.send(Msg::Event(t.name.clone(), captured)).await.is_err() {
+        if tx
+            .send(Msg::Event(t.name.clone(), key.clone(), captured))
+            .await
+            .is_err()
+        {
             break;
         }
     }
