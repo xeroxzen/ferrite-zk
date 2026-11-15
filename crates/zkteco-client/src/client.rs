@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::SystemTime;
 
 use tokio::time::Instant;
 use zkteco_proto::commkey;
@@ -34,7 +35,7 @@ pub struct Client {
     /// User layout detected from the last user table read.
     pub(crate) detected_user_format: Option<UserFormat>,
     /// Live events received while waiting for replies.
-    pending: VecDeque<LiveEvent>,
+    pending: VecDeque<Queued>,
     dropped_events: u64,
     discarded_replies: u64,
     recording: Option<Recording>,
@@ -268,7 +269,8 @@ impl Client {
     async fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
         if self.config.read_only {
             let command = Command::from(u16::from_le_bytes([bytes[0], bytes[1]]));
-            if !READ_ONLY_COMMANDS.contains(&command) {
+            let subscription = command == Command::RegEvent && self.config.allow_event_subscription;
+            if !READ_ONLY_COMMANDS.contains(&command) && !subscription {
                 tracing::warn!(?command, "refused: read-only client");
                 return Err(Error::ReadOnly(command));
             }
@@ -373,6 +375,7 @@ impl Client {
     pub(crate) async fn queue_event(&mut self, packet: &Packet) -> Result<()> {
         self.ack_event().await?;
         let capacity = self.config.pending_event_capacity;
+        let (at, instant) = (SystemTime::now(), std::time::Instant::now());
         for event in event::decode(packet, self.config.encoding)? {
             if self.pending.len() >= capacity {
                 self.pending.pop_front();
@@ -386,7 +389,7 @@ impl Client {
                     continue;
                 }
             }
-            self.pending.push_back(event);
+            self.pending.push_back(Queued { event, at, instant });
         }
         Ok(())
     }
@@ -398,19 +401,19 @@ impl Client {
     }
 
     /// Put an event back at the front of the pending queue.
-    pub(crate) fn unpop_pending(&mut self, event: LiveEvent) {
-        self.pending.push_front(event);
+    pub(crate) fn unpop_pending(&mut self, queued: Queued) {
+        self.pending.push_front(queued);
     }
 
     /// The oldest pending live event, if any.
-    pub(crate) fn pop_pending(&mut self) -> Option<LiveEvent> {
+    pub(crate) fn pop_pending(&mut self) -> Option<Queued> {
         self.pending.pop_front()
     }
 
     /// Remove and return the live events that arrived while the client was
     /// waiting for replies, oldest first. Each was acknowledged on arrival.
     pub fn take_pending_events(&mut self) -> Vec<LiveEvent> {
-        self.pending.drain(..).collect()
+        self.pending.drain(..).map(|q| q.event).collect()
     }
 
     /// Events dropped because the pending queue was full (see
@@ -420,6 +423,16 @@ impl Client {
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
     }
+}
+
+/// A live event and when it arrived.
+#[derive(Debug, Clone)]
+pub(crate) struct Queued {
+    pub(crate) event: LiveEvent,
+    /// Wall-clock arrival time.
+    pub(crate) at: SystemTime,
+    /// Monotonic arrival time.
+    pub(crate) instant: std::time::Instant,
 }
 
 /// Map a non-success reply to an error.

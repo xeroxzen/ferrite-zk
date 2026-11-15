@@ -216,7 +216,7 @@ async fn live_capture_subscribes_and_stops() {
     let until = tokio::time::Instant::now() + Duration::from_secs(secs);
     let (mut punches, mut other) = (0, 0);
     while let Ok(item) = tokio::time::timeout_at(until, capture.next()).await {
-        match item.expect("stream ended early").unwrap() {
+        match item.expect("stream ended early").unwrap().event {
             LiveEvent::Attendance(_) => punches += 1,
             LiveEvent::Raw { flag, payload } => {
                 other += 1;

@@ -48,6 +48,14 @@ struct DiagnoseArgs {
     /// this directory. Captures are always scrubbed.
     #[arg(long, value_name = "DIR")]
     capture: Option<PathBuf>,
+    /// After the table probes, subscribe to live events and report their
+    /// flags and payload lengths (never payloads), and whether the device
+    /// answers requests while subscribed. Punch in on the device meanwhile.
+    #[arg(long)]
+    probe_live: bool,
+    /// How long the live probe listens, in seconds.
+    #[arg(long, default_value_t = 60, requires = "probe_live")]
+    probe_live_secs: u64,
     /// Write the report to this file instead of standard output.
     #[arg(long, short, value_name = "FILE")]
     output: Option<PathBuf>,
@@ -93,6 +101,7 @@ async fn run_diagnose(args: DiagnoseArgs) -> Result<()> {
         timeout: Duration::from_millis(args.timeout_ms),
         include_identifiers: args.include_identifiers,
         capture: args.capture.is_some(),
+        probe_live: args.probe_live.then(|| Duration::from_secs(args.probe_live_secs)),
     };
     let outcome = diagnose::run(&opts)
         .await

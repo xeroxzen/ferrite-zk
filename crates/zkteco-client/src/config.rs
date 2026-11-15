@@ -60,6 +60,15 @@ pub struct ClientConfig {
     /// Live events kept while waiting for replies (default 1024). When full,
     /// the oldest is dropped and counted.
     pub pending_event_capacity: usize,
+    /// TCP keepalive idle time (default 30 seconds): after this long
+    /// without traffic the operating system probes the connection, so a
+    /// device that loses power is noticed even when nothing is being sent.
+    /// `None` leaves keepalive off. Ignored over UDP.
+    pub tcp_keepalive: Option<Duration>,
+    /// With [`read_only`](Self::read_only), also allow `CMD_REG_EVENT`, so a
+    /// read-only client can subscribe to live events (default `false`).
+    /// Subscribing changes no data; it ends with the session.
+    pub allow_event_subscription: bool,
 }
 
 /// Which transport to use.
@@ -130,7 +139,23 @@ impl ClientConfig {
             attendance_format: None,
             reply_id_policy: ReplyIdPolicy::Strict,
             pending_event_capacity: 1024,
+            tcp_keepalive: Some(Duration::from_secs(30)),
+            allow_event_subscription: false,
         }
+    }
+
+    /// Set the TCP keepalive idle time; `None` turns keepalive off.
+    #[must_use]
+    pub fn tcp_keepalive(mut self, idle: Option<Duration>) -> Self {
+        self.tcp_keepalive = idle;
+        self
+    }
+
+    /// Allow a read-only client to subscribe to live events.
+    #[must_use]
+    pub fn allow_event_subscription(mut self, enabled: bool) -> Self {
+        self.allow_event_subscription = enabled;
+        self
     }
 
     /// Set the port.

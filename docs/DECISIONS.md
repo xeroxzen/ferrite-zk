@@ -523,6 +523,48 @@ list.
 - Not cancel-safe, documented: a dropped future leaves the device in
   enrolment mode.
 
+## D31. Live capture after the phase 5 review
+
+- **TCP keepalive** (`ClientConfig::tcp_keepalive`, default 30 s idle, via
+  `socket2`) on every TCP connection, so the operating system notices a
+  dead peer even when nothing is sent. Probe interval and count are left to
+  the OS; not every platform lets them be set.
+- **Tolerant heartbeat.** An unanswered heartbeat no longer closes the
+  connection: the wait ends without the usual timeout handling, a late
+  reply is discarded by its reply ID, and only `heartbeat_misses` (default
+  3) unanswered heartbeats in a row close the connection, reported as a
+  `GetTime` timeout. Any packet from the device resets the count. This
+  keeps working if Q6 turns out to be "no" for some firmware, as long as
+  keepalive or events show the device is there.
+- **Event times.** Items are `CapturedEvent { event, source, device_time,
+  received_at, received_instant }`. `device_time` is the device clock in
+  the record (no time zone); `received_at` is host wall-clock time when the
+  packet arrived (stamped on arrival in the client's queue, not when
+  delivered); `received_instant` is the host monotonic clock.
+- **Backfill** (`CaptureOptions::backfill`, needs `reconnect`). The first
+  subscription reads the device clock as the starting watermark; every
+  delivered attendance event moves it forward. After each reconnect and
+  resubscription (so nothing falls between), the attendance log is read and
+  records at or after the watermark are delivered as `Source::Backfill`, in
+  log order, before live events. The log is read whole; there is no "since"
+  query in the protocol.
+- **Dedup.** Every attendance delivery (live or backfill) is keyed by user
+  (user ID, else uid), device time, status and punch. A key among the last
+  4,096 delivered is skipped and counted. This covers punches already
+  delivered live that reappear in the log, and a device resending an event
+  whose acknowledgement was lost. Two genuine punches with the same key in
+  the same second are indistinguishable and delivered once; the log has no
+  other identifier.
+- `LiveCapture::stats()` exposes counters (events, backfilled, duplicates,
+  reconnects, heartbeats sent, answered, missed).
+- `stop()` returns undelivered backfill to the client's pending queue with
+  the rest, so nothing read is lost.
+- **`diagnose --probe-live`** subscribes for a set time (default 60 s) with
+  a read-only client that additionally allows `CMD_REG_EVENT`
+  (`ClientConfig::allow_event_subscription`) and skips the preparation
+  commands. It reports event flags and payload lengths, never payloads, and
+  heartbeat answers; it answers Q5 and Q6.
+
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 
 No hardware is available. Nothing in the code assumes an answer to these;
@@ -545,10 +587,12 @@ that the first diagnose reports can close them.
   (D27) stays empty until diagnose reports fill it; no rows come from
   documentation or issue reports.
 - **Q5. Zero-flag events.** Does any firmware send attendance events with
-  an empty flag field? Decoding accepts it by payload length (D9); a
-  capture would confirm or remove that path.
+  an empty flag field? Decoding accepts it by payload length (D9). Answered
+  by `live.packets` in a `diagnose --probe-live` report.
 - **Q6. Requests while subscribed.** Does a device answer commands (the
-  heartbeat's `CMD_GET_TIME`) while events are registered? D29 assumes so.
+  heartbeat's `CMD_GET_TIME`) while events are registered? The heartbeat
+  tolerates silence (D31) rather than assuming either answer. Answered by
+  `live.answers_while_subscribed`.
 - **Q7. Enrolment reports.** Which event flag carries enrolment reports, how
   many reports a scan produces, and what a 0 code before any accepted scan
   means (D30).

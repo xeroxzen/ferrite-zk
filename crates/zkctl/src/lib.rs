@@ -9,4 +9,5 @@
 
 pub mod capture;
 pub mod diagnose;
+pub mod live_probe;
 pub mod streams;

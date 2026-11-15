@@ -33,7 +33,13 @@ impl Link {
     pub(crate) async fn connect(config: &ClientConfig, transport: Transport) -> Result<Self> {
         let (host, port, timeout) = (config.host.as_str(), config.port, config.connect_timeout);
         Ok(match transport {
-            Transport::Tcp => Self::Tcp(TcpLink::connect(host, port, timeout).await?),
+            Transport::Tcp => {
+                let link = TcpLink::connect(host, port, timeout).await?;
+                if let Some(idle) = config.tcp_keepalive {
+                    link.keepalive(idle)?;
+                }
+                Self::Tcp(link)
+            }
             Transport::Udp => Self::Udp(UdpLink::connect(host, port, timeout).await?),
         })
     }
@@ -143,6 +149,14 @@ impl TcpLink {
         })
     }
 
+    /// Turn on TCP keepalive with this idle time; probes then follow at
+    /// the operating system's interval.
+    fn keepalive(&self, idle: Duration) -> Result<()> {
+        let params = socket2::TcpKeepalive::new().with_time(idle);
+        socket2::SockRef::from(&self.stream).set_tcp_keepalive(&params)?;
+        Ok(())
+    }
+
     /// Send one packet (header and payload), adding the TCP frame prefix.
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         let frame = encode_tcp(packet);
@@ -179,5 +193,25 @@ impl TcpLink {
         if let Err(e) = self.stream.shutdown().await {
             tracing::debug!(%e, "shutdown after close");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn keepalive_is_set_on_the_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let link = TcpLink::connect("127.0.0.1", port, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let sock = socket2::SockRef::from(&link.stream);
+        assert!(!sock.keepalive().unwrap());
+        link.keepalive(Duration::from_secs(30)).unwrap();
+        assert!(sock.keepalive().unwrap());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(sock.keepalive_time().unwrap(), Duration::from_secs(30));
     }
 }

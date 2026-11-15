@@ -1,20 +1,27 @@
 //! Real-time events (`CMD_REG_EVENT`) as a [`Stream`].
 
-use std::collections::HashMap;
+mod capture;
+mod dedup;
+
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use chrono::NaiveDateTime;
 use futures_core::{FusedStream, Stream};
-use tokio::time::Instant;
 use zkteco_proto::records::event::LiveEvent;
-use zkteco_proto::{requests, Command, EventFlags, Uid, UserId};
+use zkteco_proto::EventFlags;
 
 use crate::client::Client;
 use crate::config::ClientConfig;
-use crate::error::{Error, Result};
+use crate::error::Result;
+use capture::{Capture, Step};
+
+pub use dedup::DEDUP_CAPACITY;
 
 /// The longest a capture step waits for a packet before yielding to the
 /// executor. Bounds how long [`LiveCapture::stop`] waits for a step in
@@ -35,14 +42,25 @@ pub struct CaptureOptions {
     /// reconnect). Default: `false`.
     pub resolve_users: bool,
     /// After this long without a packet from the device, send
-    /// `CMD_GET_TIME` to check that it still answers. A device that does
-    /// not answer within the request timeout ends the connection. `None`
-    /// never checks: a device that disappears without closing the
-    /// connection then goes unnoticed. Default: 60 seconds.
+    /// `CMD_GET_TIME` to check that it still answers. `None` never checks.
+    /// Default: 60 seconds. TCP keepalive
+    /// ([`ClientConfig::tcp_keepalive`]) detects a dead connection
+    /// independently.
     pub heartbeat: Option<Duration>,
+    /// Unanswered heartbeats in a row before the connection is treated as
+    /// lost (closed, and reported as [`Error::Timeout`](crate::Error::Timeout)).
+    /// Any packet from the device resets the count. Whether devices answer
+    /// requests while subscribed is not known (DECISIONS.md Q6), so one
+    /// silence is not enough. Default: 3; 0 counts as 1.
+    pub heartbeat_misses: u32,
     /// Reconnect and resubscribe when the connection is lost. `None` ends
     /// the stream instead. Default: `None`.
     pub reconnect: Option<ReconnectPolicy>,
+    /// After each reconnect, read the attendance log and deliver the
+    /// records stored while disconnected, marked [`Source::Backfill`].
+    /// Records already delivered are skipped (see [`CapturedEvent`]).
+    /// Needs [`reconnect`](Self::reconnect). Default: `false`.
+    pub backfill: bool,
 }
 
 impl Default for CaptureOptions {
@@ -52,7 +70,9 @@ impl Default for CaptureOptions {
             prepare: true,
             resolve_users: false,
             heartbeat: Some(Duration::from_secs(60)),
+            heartbeat_misses: 3,
             reconnect: None,
+            backfill: false,
         }
     }
 }
@@ -88,33 +108,70 @@ impl ReconnectPolicy {
     }
 }
 
-/// What one capture step produced.
-#[derive(Debug)]
-enum Step {
-    Event(LiveEvent),
-    /// Nothing yet; poll again.
-    Idle,
-    Failed(Error),
-    End,
+/// Where a [`CapturedEvent`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// Pushed by the device as it happened.
+    Live,
+    /// Read from the attendance log after a reconnect: it happened while
+    /// the connection was down.
+    Backfill,
 }
 
-/// The capture state, owned by whichever step is running.
-#[derive(Debug)]
-struct Capture {
-    client: Client,
-    opts: CaptureOptions,
-    by_uid: HashMap<Uid, UserId>,
-    by_user_id: HashMap<UserId, Uid>,
-    last_heard: Instant,
-    /// The device was disabled when the capture started, and the capture
-    /// enabled it.
-    enabled_device: bool,
-    /// Consecutive failed reconnects.
-    failures: u32,
-    ended: bool,
+/// One event from a [`LiveCapture`], with when and how it arrived.
+///
+/// Attendance is delivered at most once per capture: an event whose user,
+/// device time, status and punch match one of the last
+/// [`DEDUP_CAPACITY`] delivered is skipped, whether it arrives live or by
+/// backfill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedEvent {
+    /// The event.
+    pub event: LiveEvent,
+    /// Live, or backfilled after a reconnect.
+    pub source: Source,
+    /// The device's clock reading in the event (attendance time; device
+    /// local, no time zone). `None` for undecoded events.
+    pub device_time: Option<NaiveDateTime>,
+    /// Host wall-clock time when the packet arrived (for backfill, when the
+    /// log was read).
+    pub received_at: SystemTime,
+    /// Host monotonic time of arrival, for ordering and intervals that
+    /// clock changes cannot disturb.
+    pub received_instant: std::time::Instant,
 }
 
-type StepFuture = Pin<Box<dyn Future<Output = (Capture, Step)> + Send>>;
+/// Counters for one [`LiveCapture`], since it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureStats {
+    /// Events delivered (live and backfilled).
+    pub events: u64,
+    /// Of those, backfilled.
+    pub backfilled: u64,
+    /// Duplicate attendance events skipped.
+    pub duplicates: u64,
+    /// Successful reconnects.
+    pub reconnects: u64,
+    /// Heartbeats sent.
+    pub heartbeats_sent: u64,
+    /// Heartbeats answered.
+    pub heartbeats_answered: u64,
+    /// Heartbeats not answered within the request timeout.
+    pub heartbeats_missed: u64,
+}
+
+#[derive(Debug, Default)]
+struct Counters {
+    events: AtomicU64,
+    backfilled: AtomicU64,
+    duplicates: AtomicU64,
+    reconnects: AtomicU64,
+    heartbeats_sent: AtomicU64,
+    heartbeats_answered: AtomicU64,
+    heartbeats_missed: AtomicU64,
+}
+
+type StepFuture = Pin<Box<dyn Future<Output = (Box<Capture>, Step)> + Send>>;
 
 enum State {
     Ready(Box<Capture>),
@@ -145,22 +202,21 @@ enum State {
 /// Dropping a `LiveCapture` closes the connection without unsubscribing.
 pub struct LiveCapture {
     state: State,
+    counters: Arc<Counters>,
 }
 
 impl fmt::Debug for LiveCapture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = match &self.state {
-            State::Ready(c) => {
-                if c.ended {
-                    "ended"
-                } else {
-                    "ready"
-                }
-            }
+            State::Ready(c) if c.ended => "ended",
+            State::Ready(_) => "ready",
             State::Stepping(_) => "stepping",
             State::Moving => "moving",
         };
-        f.debug_struct("LiveCapture").field("state", &state).finish()
+        f.debug_struct("LiveCapture")
+            .field("state", &state)
+            .field("counters", &self.counters)
+            .finish()
     }
 }
 
@@ -172,7 +228,9 @@ impl Client {
     /// table; with [`CaptureOptions::prepare`], cancel any capture and
     /// enter verify mode; enable the device if this client disabled it
     /// (it is disabled again by [`LiveCapture::stop`]); send
-    /// `CMD_REG_EVENT` with [`CaptureOptions::events`].
+    /// `CMD_REG_EVENT` with [`CaptureOptions::events`]; with
+    /// [`CaptureOptions::backfill`], read the device clock as the starting
+    /// point for backfill.
     ///
     /// # Errors
     ///
@@ -180,19 +238,12 @@ impl Client {
     /// closed) in that case; reconnect with [`LiveCapture::connect`] or a
     /// new [`Client`].
     pub async fn live_capture(self, opts: CaptureOptions) -> Result<LiveCapture> {
-        let mut capture = Capture {
-            client: self,
-            opts,
-            by_uid: HashMap::new(),
-            by_user_id: HashMap::new(),
-            last_heard: Instant::now(),
-            enabled_device: false,
-            failures: 0,
-            ended: false,
-        };
+        let counters = Arc::new(Counters::default());
+        let mut capture = Capture::new(self, opts, Arc::clone(&counters));
         capture.subscribe().await?;
         Ok(LiveCapture {
             state: State::Ready(Box::new(capture)),
+            counters,
         })
     }
 }
@@ -210,27 +261,51 @@ impl LiveCapture {
     }
 
     /// The next event; `None` once the stream has ended. Cancel-safe.
-    pub async fn next(&mut self) -> Option<Result<LiveEvent>> {
+    pub async fn next(&mut self) -> Option<Result<CapturedEvent>> {
         std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
+    /// Counters since the capture started.
+    #[must_use]
+    pub fn stats(&self) -> CaptureStats {
+        let c = &self.counters;
+        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        CaptureStats {
+            events: get(&c.events),
+            backfilled: get(&c.backfilled),
+            duplicates: get(&c.duplicates),
+            reconnects: get(&c.reconnects),
+            heartbeats_sent: get(&c.heartbeats_sent),
+            heartbeats_answered: get(&c.heartbeats_answered),
+            heartbeats_missed: get(&c.heartbeats_missed),
+        }
     }
 
     /// Unsubscribe (`CMD_REG_EVENT` with an empty mask), disable the device
     /// again if the capture enabled it, and return the client.
     ///
     /// A step in progress is finished first: up to a second while idle,
-    /// longer during a heartbeat or a reconnect. An event it received is
-    /// kept, with any other event received before unsubscribing, in the
-    /// client's pending queue ([`Client::take_pending_events`]). Nothing is
-    /// sent if the connection is closed.
+    /// longer during a heartbeat, a reconnect or a backfill. Events not yet
+    /// delivered (from that step, backfilled, or received before
+    /// unsubscribing) are kept in the client's pending queue
+    /// ([`Client::take_pending_events`]). Nothing is sent if the
+    /// connection is closed.
     pub async fn stop(self) -> (Client, Result<()>) {
         let mut capture = match self.state {
-            State::Ready(capture) => *capture,
+            State::Ready(capture) => {
+                let mut capture = capture;
+                capture.requeue(None);
+                capture
+            }
             State::Stepping(step) => {
                 let (mut capture, step) = step.await;
                 match step {
-                    Step::Event(event) => capture.client.unpop_pending(event),
-                    Step::Failed(e) => tracing::warn!(%e, "capture step failed while stopping"),
-                    Step::Idle | Step::End => {}
+                    Step::Event(event) => capture.requeue(Some(event)),
+                    Step::Failed(e) => {
+                        tracing::warn!(%e, "capture step failed while stopping");
+                        capture.requeue(None);
+                    }
+                    Step::Idle | Step::End => capture.requeue(None),
                 }
                 capture
             }
@@ -242,7 +317,7 @@ impl LiveCapture {
 }
 
 impl Stream for LiveCapture {
-    type Item = Result<LiveEvent>;
+    type Item = Result<CapturedEvent>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -255,7 +330,7 @@ impl Stream for LiveCapture {
             this.state = State::Stepping(step);
             return Poll::Pending;
         };
-        this.state = State::Ready(Box::new(capture));
+        this.state = State::Ready(capture);
         match outcome {
             Step::Event(event) => Poll::Ready(Some(Ok(event))),
             Step::Failed(e) => Poll::Ready(Some(Err(e))),
@@ -272,141 +347,6 @@ impl Stream for LiveCapture {
 impl FusedStream for LiveCapture {
     fn is_terminated(&self) -> bool {
         matches!(&self.state, State::Ready(c) if c.ended)
-    }
-}
-
-impl Capture {
-    async fn step(mut self: Box<Self>) -> (Self, Step) {
-        let step = self.advance().await;
-        (*self, step)
-    }
-
-    async fn advance(&mut self) -> Step {
-        if self.ended {
-            return Step::End;
-        }
-        if let Some(event) = self.client.pop_pending() {
-            return Step::Event(self.resolve(event));
-        }
-        if !self.client.is_connected() {
-            return self.recover().await;
-        }
-        if let Err(e) = self.listen().await {
-            tracing::warn!(%e, connected = self.client.is_connected(), "live capture error");
-            return Step::Failed(e);
-        }
-        match self.client.pop_pending() {
-            Some(event) => Step::Event(self.resolve(event)),
-            None => Step::Idle,
-        }
-    }
-
-    /// Wait up to one tick for a packet, or send the heartbeat if it is due.
-    async fn listen(&mut self) -> Result<()> {
-        let now = Instant::now();
-        let tick_end = now + IDLE_TICK;
-        let deadline = match self.opts.heartbeat {
-            Some(every) if now >= self.last_heard + every => {
-                tracing::debug!("heartbeat");
-                self.client.ack(Command::GetTime, &[]).await?;
-                self.last_heard = Instant::now();
-                return Ok(());
-            }
-            Some(every) => tick_end.min(self.last_heard + every),
-            None => tick_end,
-        };
-        let Some(packet) = self.client.recv_by(deadline).await? else {
-            return Ok(());
-        };
-        self.last_heard = Instant::now();
-        if packet.header.command == Command::RegEvent {
-            return self.client.queue_event(&packet).await;
-        }
-        tracing::warn!(
-            command = ?packet.header.command,
-            reply_id = packet.header.reply_id,
-            "unexpected packet during live capture; ignored"
-        );
-        Ok(())
-    }
-
-    /// One reconnect attempt, after the backoff, under the reconnect policy.
-    async fn recover(&mut self) -> Step {
-        let Some(policy) = self.opts.reconnect else {
-            self.ended = true;
-            return Step::End;
-        };
-        if self.failures >= policy.max_attempts {
-            tracing::warn!(failures = self.failures, "live capture: giving up reconnecting");
-            self.ended = true;
-            return Step::End;
-        }
-        tokio::time::sleep(policy.backoff(self.failures)).await;
-        let attempt = async {
-            self.client.reconnect().await?;
-            self.subscribe().await
-        };
-        match attempt.await {
-            Ok(()) => {
-                tracing::info!(after_failures = self.failures, "live capture resubscribed");
-                self.failures = 0;
-                Step::Idle
-            }
-            Err(e) => {
-                self.failures = self.failures.saturating_add(1);
-                if matches!(e, Error::Unauthorized) {
-                    self.ended = true;
-                }
-                tracing::warn!(%e, failures = self.failures, "live capture reconnect failed");
-                Step::Failed(e)
-            }
-        }
-    }
-
-    async fn subscribe(&mut self) -> Result<()> {
-        if self.opts.resolve_users {
-            let users = self.client.users().await?.records;
-            self.by_uid = users.iter().map(|u| (u.uid, u.user_id.clone())).collect();
-            self.by_user_id = users.into_iter().map(|u| (u.user_id, u.uid)).collect();
-        }
-        if self.opts.prepare {
-            self.client.cancel_capture().await?;
-            self.client.verify_user().await?;
-        }
-        if self.client.device_disabled {
-            self.client.enable_device().await?;
-            self.enabled_device = true;
-        }
-        let mask = requests::reg_event(self.opts.events);
-        self.client.ack(Command::RegEvent, &mask).await?;
-        self.last_heard = Instant::now();
-        tracing::debug!(events = ?self.opts.events, "subscribed to live events");
-        Ok(())
-    }
-
-    async fn unsubscribe(&mut self) -> Result<()> {
-        if !self.client.is_connected() {
-            return Ok(());
-        }
-        let mask = requests::reg_event(EventFlags::empty());
-        self.client.ack(Command::RegEvent, &mask).await?;
-        if self.enabled_device {
-            self.client.disable_device().await?;
-        }
-        Ok(())
-    }
-
-    fn resolve(&self, event: LiveEvent) -> LiveEvent {
-        let LiveEvent::Attendance(mut a) = event else {
-            return event;
-        };
-        if a.user_id.is_none() {
-            a.user_id = a.uid.and_then(|uid| self.by_uid.get(&uid).cloned());
-        }
-        if a.uid.is_none() {
-            a.uid = a.user_id.as_ref().and_then(|id| self.by_user_id.get(id).copied());
-        }
-        LiveEvent::Attendance(a)
     }
 }
 

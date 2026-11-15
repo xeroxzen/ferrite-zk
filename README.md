@@ -55,7 +55,7 @@ them before committing.
 let client = Client::connect(ClientConfig::new("192.168.1.201")).await?;
 let mut capture = client.live_capture(CaptureOptions::default()).await?;
 while let Some(event) = capture.next().await {
-    if let LiveEvent::Attendance(punch) = event? {
+    if let LiveEvent::Attendance(punch) = event?.event {
         println!("{:?} at {}", punch.user_id, punch.timestamp);
     }
 }
@@ -63,9 +63,13 @@ let (client, result) = capture.stop().await;
 ```
 
 `next()` is cancel-safe, so it can sit in a `tokio::select!` with a
-shutdown signal. `CaptureOptions::reconnect` keeps the stream alive across
-dropped connections; a heartbeat (default 60 s) detects a device that went
-away without closing the connection (D29).
+shutdown signal. Each item is a `CapturedEvent`: the event, its source
+(live or backfill), the device time, and the host's wall-clock and
+monotonic arrival times. `CaptureOptions::reconnect` keeps the stream alive
+across dropped connections, and `backfill` then reads the punches stored
+while disconnected, delivering each punch once. TCP keepalive and a
+heartbeat that tolerates missed answers detect a device that went away
+without closing the connection (D29, D31).
 
 ## Help wanted: device reports
 
@@ -76,8 +80,13 @@ allowlist of reads before anything is sent, so it cannot change users,
 logs or settings.
 
 ```sh
-ZK_PASSWORD=0 cargo run -p zkctl -- diagnose <device-ip> -o report.json
+ZK_PASSWORD=0 cargo run -p zkctl -- diagnose <device-ip> --probe-live -o report.json
 ```
+
+`--probe-live` listens for live events for 60 seconds after the table
+reads; punch in on the device a few times meanwhile. It reports only event
+flags and payload lengths, and whether the device answers requests while
+subscribed.
 
 The report holds the firmware version, platform, record layouts, counts and
 packet sizes. Serial number and MAC are scrubbed by default; it contains no

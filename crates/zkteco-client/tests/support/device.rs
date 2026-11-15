@@ -33,6 +33,8 @@ pub struct Faults {
     pub delivery: Delivery,
     /// Send no reply to the next request with this command.
     pub drop_reply_once: Option<Command>,
+    /// Send no reply to any request with this command.
+    pub drop_replies: Option<Command>,
     /// Reply `AckError` to every request with this command.
     pub ack_error: Option<Command>,
     /// Reply `AckUnauth` to every request with this command (after login).
@@ -75,6 +77,7 @@ impl Default for Faults {
         Self {
             delivery: Delivery::Separate,
             drop_reply_once: None,
+            drop_replies: None,
             ack_error: None,
             ack_unauth: None,
             bad_checksum_once: None,
@@ -205,6 +208,9 @@ impl DeviceState {
             self.faults.drop_reply_once = None;
             return Outcome::default();
         }
+        if self.faults.drop_replies == Some(cmd) {
+            return Outcome::default();
+        }
         if self.faults.close_on == Some(cmd) {
             return Outcome {
                 replies: Vec::new(),
@@ -247,17 +253,35 @@ impl DeviceState {
         Outcome { replies, close }
     }
 
-    /// An `ATTLOG` event for the next user ID (counting up from 1).
-    pub fn event_packet(&mut self) -> Vec<u8> {
-        self.events_sent += 1;
-        let a = Attendance {
-            uid: None,
+    /// The attendance record of the latest event: user ID `events_sent`.
+    pub fn last_event_record(&self) -> Attendance {
+        Attendance {
+            uid: Some(Uid(u16::try_from(self.events_sent).unwrap())),
             user_id: Some(UserId(self.events_sent.to_string())),
             timestamp: self.time,
             status: attendance::AttendanceStatus::Fingerprint,
             punch: attendance::Punch::CheckIn,
             workcode: None,
-        };
+        }
+    }
+
+    /// An `ATTLOG` event repeating the punch of user ID `n`.
+    pub fn event_packet_for(&self, n: u32) -> Vec<u8> {
+        let mut a = self.last_event_record();
+        a.user_id = Some(UserId(n.to_string()));
+        let payload = zkteco_proto::records::event::encode_record(
+            &a,
+            zkteco_proto::records::event::EventRecordFormat::Numeric12,
+            self.encoding,
+        )
+        .unwrap();
+        event_with(EventFlags::ATTLOG, &payload)
+    }
+
+    /// An `ATTLOG` event for the next user ID (counting up from 1).
+    pub fn event_packet(&mut self) -> Vec<u8> {
+        self.events_sent += 1;
+        let a = self.last_event_record();
         let payload = zkteco_proto::records::event::encode_record(
             &a,
             zkteco_proto::records::event::EventRecordFormat::Numeric12,

@@ -140,6 +140,9 @@ impl MockDevice {
             for _ in 0..n {
                 let event = st.event_packet();
                 st.outbox.push(event);
+                // A real device also stores the punch in its log.
+                let record = st.last_event_record();
+                st.attendance.push(record);
             }
         }
         self.pushed.send_modify(|v| *v += 1);
@@ -149,6 +152,17 @@ impl MockDevice {
     pub fn push_packets(&self, packets: Vec<Vec<u8>>) {
         self.state().outbox.extend(packets);
         self.pushed.send_modify(|v| *v += 1);
+    }
+
+    /// Store `n` punches in the log without sending events, as happens
+    /// while no client is connected.
+    pub fn record_offline(&self, n: usize) {
+        let mut st = self.state();
+        for _ in 0..n {
+            st.events_sent += 1;
+            let record = st.last_event_record();
+            st.attendance.push(record);
+        }
     }
 
     /// Close the TCP connection from the device's side.

@@ -5,7 +5,8 @@
 //! [`ClientConfig::read_only`](zkteco_client::ClientConfig::read_only), so
 //! the client itself refuses any command outside
 //! [`READ_ONLY_COMMANDS`](zkteco_client::READ_ONLY_COMMANDS). Templates are
-//! never read.
+//! never read. The optional live probe ([`crate::live_probe`]) also allows
+//! `CMD_REG_EVENT`.
 
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use zkteco_proto::records::user::{self, UserFormat};
 use zkteco_proto::TextEncoding;
 
 use crate::capture::{self, Layouts, Meta};
+use crate::live_probe::{self, LiveProbe};
 use crate::streams::{self, StreamHeaders};
 
 /// Placeholder for identifiers left out of the report.
@@ -43,6 +45,8 @@ pub struct Options {
     pub include_identifiers: bool,
     /// Build scrubbed captures of each read.
     pub capture: bool,
+    /// Listen for live events this long after the table probes.
+    pub probe_live: Option<Duration>,
 }
 
 /// The report: one compatibility row and the evidence for it.
@@ -61,6 +65,8 @@ pub struct Report {
     pub udp_stream_note: Option<String>,
     /// Whether each UDP probe's table bytes equal the TCP probe's.
     pub udp_matches_tcp: Vec<Comparison>,
+    /// The live-event probe, if asked for.
+    pub live: Option<LiveProbe>,
     /// Tool version.
     pub tool: String,
 }
@@ -233,6 +239,16 @@ pub async fn run(opts: &Options) -> zkteco_client::Result<Outcome> {
     } else {
         Vec::new()
     };
+    let live = match opts.probe_live {
+        Some(listen) => Some(
+            live_probe::run(
+                live_probe::config(config(opts, main_transport(main_wire))),
+                listen,
+            )
+            .await,
+        ),
+        None => None,
+    };
     let stream = probes
         .iter()
         .find_map(|p| p.stream.clone())
@@ -247,10 +263,18 @@ pub async fn run(opts: &Options) -> zkteco_client::Result<Outcome> {
             Err(e) => Some(e),
         },
         udp_matches_tcp: compare(&probes),
+        live,
         probes,
         tool: format!("zkctl {}", env!("CARGO_PKG_VERSION")),
     };
     Ok(Outcome { report, captures })
+}
+
+fn main_transport(wire: zkteco_proto::Transport) -> Transport {
+    match wire {
+        zkteco_proto::Transport::Tcp => Transport::Tcp,
+        zkteco_proto::Transport::Udp => Transport::Udp,
+    }
 }
 
 async fn identifier(client: &mut Client, key: &str, opts: &Options) -> zkteco_client::Result<String> {

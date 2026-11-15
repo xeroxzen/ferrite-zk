@@ -22,6 +22,7 @@ fn options(dev: &MockDevice) -> Options {
         timeout: Duration::from_millis(500),
         include_identifiers: false,
         capture: true,
+        probe_live: None,
     }
 }
 
@@ -156,4 +157,48 @@ async fn captures_are_scrubbed_and_valid() {
         );
         assert!(contains(&wire, b"User1\0"), "{name}: synthetic names present");
     }
+}
+
+#[tokio::test]
+async fn live_probe_reports_event_shapes_only() {
+    let dev = device().await;
+    let opts = Options {
+        capture: false,
+        probe_live: Some(Duration::from_secs(1)),
+        ..options(&dev)
+    };
+    let push = async {
+        for _ in 0..400 {
+            if !dev.state().event_masks.is_empty() {
+                dev.push_events(2);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the probe never subscribed");
+    };
+    let (outcome, ()) = tokio::join!(diagnose::run(&opts), push);
+    let live = outcome.unwrap().report.live.expect("live probe ran");
+    assert_eq!(live.error, None);
+    assert_eq!((live.events, live.attendance, live.raw), (2, 2, 0));
+    assert_eq!(live.packets.len(), 1);
+    assert_eq!(
+        (
+            live.packets[0].flags,
+            live.packets[0].payload_len,
+            live.packets[0].count
+        ),
+        (1, 12, 2)
+    );
+    assert_eq!(dev.state().event_masks, [1, 0]);
+    let sent = dev.commands();
+    for refused in [
+        Command::CancelCapture,
+        Command::StartVerify,
+        Command::EnableDevice,
+    ] {
+        assert!(!sent.contains(&refused), "{refused:?} sent");
+    }
+    let json = serde_json::to_string(&live).unwrap();
+    assert!(!json.contains("user_id"), "{json}");
 }
