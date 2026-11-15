@@ -6,13 +6,19 @@
 //! capture skips the preparation commands (cancel capture, verify mode),
 //! which a read-only client may not send.
 
+use std::path::Path;
+use std::time::Duration;
+
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
-use zkteco_client::{CaptureOptions, CapturedEvent, LiveCapture, ReconnectPolicy};
+use tokio::time::Instant;
+use zkteco_client::{CaptureOptions, CapturedEvent, LiveCapture, LiveEvent, ReconnectPolicy, Resume};
+
+use super::live_state::LiveState;
 
 use crate::cli::{Format, Global, LiveArgs};
 use crate::exit::{classify, Exit, Fail};
-use crate::output::{self, EventBody, EventOut};
+use crate::output::{self, EventOut};
 use crate::target::{self, Access, Target};
 
 /// Events buffered between the device tasks and the printer.
@@ -29,37 +35,152 @@ pub(super) async fn run(g: &Global, args: &LiveArgs) -> Result<Exit> {
         return Err(Fail::usage("live is a stream: use --output ndjson (or human)"));
     }
     let targets = target::resolve(g)?;
+    let state = args.state.as_deref().map(LiveState::load);
     let (tx, rx) = mpsc::channel(CHANNEL);
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
     for t in targets {
-        tasks.spawn(device(t, args.clone(), tx.clone(), stop_rx.clone()));
+        let resume = state
+            .as_ref()
+            .filter(|_| args.backfill)
+            .and_then(|s| s.resume(&t.name));
+        if let Some(r) = &resume {
+            tracing::info!(device = t.name, since = %r.since, "resuming from the state file");
+        }
+        tasks.spawn(device(
+            t,
+            options(args, resume),
+            args.reconnect,
+            tx.clone(),
+            stop_rx.clone(),
+        ));
     }
     drop(tx);
-    let exit = print_until_done(g.output, args, rx, &stop_tx).await?;
+    let saved = args.state.as_deref().zip(state).map(|(path, state)| Saved {
+        path,
+        state,
+        every: args.state_flush,
+        dirty: false,
+        last: Instant::now(),
+    });
+    let mut printer = Printer {
+        format: g.output,
+        limit: args.count,
+        printed: 0,
+        unemitted: 0,
+        saved,
+    };
+    let exit = print_until_done(&mut printer, args.duration, rx, &stop_tx).await?;
     while let Some(joined) = tasks.join_next().await {
         if let Err(e) = joined {
             tracing::error!(%e, "device task panicked");
         }
     }
-    Ok(exit)
+    Ok(exit.worst(printer.finish()))
+}
+
+/// The single writer of standard output, and of the state file.
+struct Printer<'a> {
+    format: Format,
+    limit: Option<u64>,
+    printed: u64,
+    /// Events that arrived after the limit was reached.
+    unemitted: u64,
+    saved: Option<Saved<'a>>,
+}
+
+/// The `--state` file and when it was last written.
+struct Saved<'a> {
+    path: &'a Path,
+    state: LiveState,
+    every: Duration,
+    dirty: bool,
+    last: Instant,
+}
+
+impl Saved<'_> {
+    /// When the next save is due, if anything changed.
+    fn due(&self) -> Option<Instant> {
+        self.dirty.then(|| self.last + self.every)
+    }
+
+    /// Write the file. A failure is reported and retried at the next save;
+    /// the stream goes on.
+    fn save(&mut self) -> bool {
+        self.last = Instant::now();
+        match self.state.save(self.path) {
+            Ok(()) => {
+                self.dirty = false;
+                true
+            }
+            Err(e) => {
+                eprintln!("warning: saving {}: {e:#}", self.path.display());
+                false
+            }
+        }
+    }
+}
+
+impl Printer<'_> {
+    fn limit_reached(&self) -> bool {
+        self.limit.is_some_and(|n| self.printed >= n)
+    }
+
+    /// Emit one event, unless the limit was already reached. `true` when
+    /// this event reached the limit.
+    fn event(&mut self, device: &str, event: &CapturedEvent) -> Result<bool> {
+        if self.limit_reached() {
+            self.unemitted += 1;
+            return Ok(false);
+        }
+        print(self.format, device, event)?;
+        self.printed += 1;
+        if let (Some(saved), LiveEvent::Attendance(a)) = (self.saved.as_mut(), &event.event) {
+            saved.dirty |= saved.state.record(device, a);
+            if saved.due().is_some_and(|at| at <= Instant::now()) {
+                saved.save();
+            }
+        }
+        Ok(self.limit_reached())
+    }
+
+    /// The final save and the `--count` report. Error if the state could
+    /// not be saved.
+    fn finish(&mut self) -> Exit {
+        if let Some(n) = self.limit.filter(|_| self.limit_reached()) {
+            eprintln!(
+                "stopped after {n} events; {} further events arrived while unsubscribing and were not emitted",
+                self.unemitted
+            );
+        }
+        match self.saved.as_mut() {
+            Some(saved) if saved.dirty => {
+                if saved.save() {
+                    Exit::Ok
+                } else {
+                    Exit::Error
+                }
+            }
+            _ => Exit::Ok,
+        }
+    }
 }
 
 /// Print events until every device task has ended. Ctrl-C, `--count` and
 /// `--duration` ask the tasks to stop; they then unsubscribe and end.
 async fn print_until_done(
-    format: Format,
-    args: &LiveArgs,
+    printer: &mut Printer<'_>,
+    duration: Option<Duration>,
     mut rx: mpsc::Receiver<Msg>,
     stop: &watch::Sender<bool>,
 ) -> Result<Exit> {
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
-    let deadline = tokio::time::sleep(args.duration.unwrap_or(std::time::Duration::MAX));
+    let deadline = tokio::time::sleep(duration.unwrap_or(Duration::MAX));
     let mut deadline = std::pin::pin!(deadline);
-    let limited = args.duration.is_some();
-    let (mut printed, mut stopping, mut exit) = (0u64, false, Exit::Ok);
+    let (mut stopping, mut exit) = (false, Exit::Ok);
     // Ends when every device task has dropped its sender.
     loop {
+        let save_at = printer.saved.as_ref().and_then(Saved::due);
         tokio::select! {
             msg = rx.recv() => match msg {
                 None => return Ok(exit),
@@ -68,24 +189,24 @@ async fn print_until_done(
                     exit = exit.worst(outcome);
                 }
                 Some(Msg::Event(name, event)) => {
-                    if args.count.is_some_and(|n| printed >= n) {
-                        continue;
-                    }
-                    print(format, &name, &event)?;
-                    printed += 1;
-                    if args.count.is_some_and(|n| printed >= n) && !stopping {
+                    if printer.event(&name, &event)? && !stopping {
                         stopping = true;
                         stop.send_replace(true);
                     }
                 }
             },
+            () = tokio::time::sleep_until(save_at.unwrap_or_else(Instant::now)), if save_at.is_some() => {
+                if let Some(saved) = printer.saved.as_mut() {
+                    saved.save();
+                }
+            }
             result = &mut ctrl_c, if !stopping => {
                 result?;
                 eprintln!("stopping (unsubscribing from every device)");
                 stopping = true;
                 stop.send_replace(true);
             }
-            () = &mut deadline, if limited && !stopping => {
+            () = &mut deadline, if duration.is_some() && !stopping => {
                 stopping = true;
                 stop.send_replace(true);
             }
@@ -94,25 +215,25 @@ async fn print_until_done(
 }
 
 fn print(format: Format, device: &str, event: &CapturedEvent) -> Result<()> {
-    let out = EventOut::new(device, event);
+    let out = EventOut::captured(device, event);
     if format == Format::Ndjson {
         return output::ndjson(&out);
     }
-    let what = match &out.body {
-        EventBody::Attendance(p) => format!(
+    let what = match &out.raw {
+        None => format!(
             "user {} (uid {}) {} {}",
-            p.user_id.as_deref().unwrap_or("?"),
-            p.uid.map_or_else(|| "?".to_owned(), |u| u.to_string()),
-            p.status,
-            p.punch
+            out.user_id.as_deref().unwrap_or("?"),
+            out.uid.map_or_else(|| "?".to_owned(), |u| u.to_string()),
+            out.status.unwrap_or_default(),
+            out.punch.unwrap_or_default()
         ),
-        EventBody::Raw { flags, payload_hex } => format!("event flags {flags:#x} payload {payload_hex}"),
+        Some(raw) => format!("event flags {:#x} payload {}", raw.flags, raw.payload_hex),
     };
     let when = out.device_time.as_deref().unwrap_or("-");
     output::text(&format!("{when}  {device}  {:<8}  {what}", out.source))
 }
 
-fn options(args: &LiveArgs) -> CaptureOptions {
+fn options(args: &LiveArgs, resume: Option<Resume>) -> CaptureOptions {
     CaptureOptions {
         prepare: false,
         resolve_users: args.with_users,
@@ -121,6 +242,7 @@ fn options(args: &LiveArgs) -> CaptureOptions {
             ..ReconnectPolicy::default()
         }),
         backfill: args.backfill,
+        resume,
         ..CaptureOptions::default()
     }
 }
@@ -128,10 +250,15 @@ fn options(args: &LiveArgs) -> CaptureOptions {
 /// One device: connect (retrying with `--reconnect`), stream until asked to
 /// stop or the stream ends, unsubscribe, and pass on any event still
 /// queued.
-async fn device(t: Target, args: LiveArgs, tx: mpsc::Sender<Msg>, mut stop: watch::Receiver<bool>) {
+async fn device(
+    t: Target,
+    opts: CaptureOptions,
+    reconnect: bool,
+    tx: mpsc::Sender<Msg>,
+    mut stop: watch::Receiver<bool>,
+) {
     let config = target::config_for(&t, Access::Live).await;
-    let opts = options(&args);
-    let Some(mut capture) = subscribe(&t, &args, config, opts, &tx, &mut stop).await else {
+    let Some(mut capture) = subscribe(&t, reconnect, config, opts, &tx, &mut stop).await else {
         return;
     };
     tracing::info!(device = t.name, "subscribed");
@@ -169,7 +296,7 @@ async fn device(t: Target, args: LiveArgs, tx: mpsc::Sender<Msg>, mut stop: watc
 /// backoff until it works or the command stops.
 async fn subscribe(
     t: &Target,
-    args: &LiveArgs,
+    reconnect: bool,
     config: zkteco_client::ClientConfig,
     opts: CaptureOptions,
     tx: &mpsc::Sender<Msg>,
@@ -192,7 +319,7 @@ async fn subscribe(
                 let e = anyhow::Error::from(e).context(format!("subscribing to {}", t.name));
                 eprintln!("error: {e:#}");
                 let fatal = classify(&e) == Exit::Auth;
-                if !args.reconnect || fatal {
+                if !reconnect || fatal {
                     ended(tx, &t.name, classify(&e)).await;
                     return None;
                 }

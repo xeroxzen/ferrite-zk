@@ -11,7 +11,7 @@ use super::cursor::{self, Cursor};
 use crate::cli::{AttendanceCommand, ClearArgs, Format, Global, PullArgs};
 use crate::duration::parse_duration;
 use crate::exit::{classify, Exit, Fail};
-use crate::output::{self, RecordOut};
+use crate::output::{self, EventOut};
 use crate::target::{self, Access, Target};
 
 pub(super) async fn run(g: &Global, cmd: AttendanceCommand) -> Result<Exit> {
@@ -40,7 +40,9 @@ fn parse_bound(text: &str) -> Result<Bound> {
 
 /// One device's records.
 struct Pulled {
-    records: Vec<(Attendance, Option<UserIdSource>)>,
+    records: Vec<Attendance>,
+    /// Where each record's user ID came from, by index.
+    sources: Vec<UserIdSource>,
     rejected: Vec<RejectedRecord>,
     /// The device clock, read when a bound is relative.
     now: Option<NaiveDateTime>,
@@ -108,18 +110,26 @@ async fn read_from(client: &mut Client, with_users: bool, relative: bool) -> zkt
     if with_users {
         let batch = client.attendance_with_users().await?;
         return Ok(Pulled {
-            records: batch
-                .records
-                .into_iter()
-                .map(|r| (r.record, Some(r.source)))
-                .collect(),
+            sources: batch.records.iter().map(|r| r.source).collect(),
+            records: batch.records.into_iter().map(|r| r.record).collect(),
             rejected: batch.rejected,
             now,
         });
     }
     let batch = client.attendance().await?;
     Ok(Pulled {
-        records: batch.records.into_iter().map(|a| (a, None)).collect(),
+        sources: batch
+            .records
+            .iter()
+            .map(|a| {
+                if a.user_id.is_some() {
+                    UserIdSource::Record
+                } else {
+                    UserIdSource::Unresolved
+                }
+            })
+            .collect(),
+        records: batch.records,
         rejected: batch.rejected,
         now,
     })
@@ -132,7 +142,7 @@ fn select(
     since: Option<Bound>,
     until: Option<Bound>,
     device: &str,
-) -> (Vec<RecordOut>, Option<Cursor>) {
+) -> (Vec<EventOut>, Option<Cursor>) {
     let resolve = |b: Bound| match b {
         Bound::At(t) => Some(t),
         Bound::Ago(d) => {
@@ -142,21 +152,20 @@ fn select(
     };
     let since = since.and_then(resolve);
     let until = until.and_then(resolve);
-    let plain: Vec<Attendance> = pulled.records.iter().map(|(a, _)| a.clone()).collect();
     let mut last = None;
     let mut out = Vec::new();
-    for i in cursor::after(&plain, cursor, device) {
-        let (a, source) = &pulled.records[i];
+    for i in cursor::after(&pulled.records, cursor, device) {
+        let a = &pulled.records[i];
         if since.is_some_and(|s| a.timestamp < s) || until.is_some_and(|u| a.timestamp >= u) {
             continue;
         }
         last = Some(Cursor::of(a));
-        out.push(RecordOut::new(device, a, *source));
+        out.push(EventOut::pulled(device, a, pulled.sources[i]));
     }
     (out, last)
 }
 
-fn print(format: Format, records: &[RecordOut]) -> Result<()> {
+fn print(format: Format, records: &[EventOut]) -> Result<()> {
     match format {
         Format::Json => output::json(&records),
         Format::Ndjson => records.iter().try_for_each(output::ndjson),
@@ -166,11 +175,11 @@ fn print(format: Format, records: &[RecordOut]) -> Result<()> {
                 .map(|r| {
                     vec![
                         r.device.clone(),
-                        r.timestamp.clone(),
-                        r.punch.user_id.clone().unwrap_or_default(),
-                        r.punch.uid.map(|u| u.to_string()).unwrap_or_default(),
-                        r.punch.status.to_owned(),
-                        r.punch.punch.to_owned(),
+                        r.device_time.clone().unwrap_or_default(),
+                        r.user_id.clone().unwrap_or_default(),
+                        r.uid.map(|u| u.to_string()).unwrap_or_default(),
+                        r.status.unwrap_or_default().to_owned(),
+                        r.punch.unwrap_or_default().to_owned(),
                     ]
                 })
                 .collect();

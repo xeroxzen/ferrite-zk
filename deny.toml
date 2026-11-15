@@ -11,6 +11,8 @@ yanked = "deny"
 # by keyring 4 is still on zbus 5. They are "unmaintained" notices, not
 # vulnerabilities, and the code only runs on Linux when the keyring is used.
 # Remove once secret-service moves to zbus 6.
+# Recheck by 2027-02-15: run `cargo update -p keyring` and `cargo deny check
+# advisories` without these ignores; drop any that no longer match.
 ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant via keyring's zbus 5 Secret Service store; no maintained alternative yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names via keyring's zbus 5 Secret Service store; no maintained alternative yet" },
@@ -28,7 +30,10 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "Unicode-3.0",
-    # option-ext, via directories: file-level copyleft, unmodified, not GPL.
+    "Zlib",
+    # Only for option-ext (via directories -> dirs-sys), used unmodified.
+    # MPL-2.0 is file-level copyleft, not GPL. Anything else that arrives
+    # under MPL-2.0 needs a decision recorded in DECISIONS.md D33.
     "MPL-2.0",
 ]
 confidence-threshold = 0.9

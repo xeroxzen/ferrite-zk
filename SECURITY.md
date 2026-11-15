@@ -8,8 +8,14 @@ Report vulnerabilities privately through
 public issue.
 
 Include the affected crate and version, what an attacker can do, and the
-steps to reproduce. Fixes are released as soon as they are ready, and the
-advisory is published with credit unless you prefer otherwise.
+steps to reproduce.
+
+- Reports are acknowledged within 7 days.
+- Disclosure is coordinated: the fix and the advisory are published
+  together, within 90 days of the report, sooner when a fix is ready. If a
+  fix needs longer, the timeline is agreed with the reporter before the 90
+  days end.
+- The advisory credits the reporter unless they prefer otherwise.
 
 Only the latest release is supported while the project is in alpha.
 

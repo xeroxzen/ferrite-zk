@@ -11,9 +11,10 @@ use zkteco_proto::session::Session;
 use zkteco_proto::{Command, ProtoError};
 
 use crate::config::{ClientConfig, ReplyIdPolicy, Transport, READ_ONLY_COMMANDS};
+use crate::data::UserIdSource;
 use crate::error::{Error, Result};
 use crate::link::{Link, TcpLink};
-use crate::live::{CapturedEvent, Source};
+use crate::live::{user_id_source, CapturedEvent, Source};
 use crate::record::{Direction, Recording};
 
 /// Packets (events, mismatched replies) accepted at most while waiting for
@@ -454,6 +455,7 @@ impl Client {
             self.pending.push_back(Queued {
                 event,
                 source: Source::Live,
+                user_id_source: None,
                 at,
                 instant,
             });
@@ -497,6 +499,7 @@ impl Client {
                     LiveEvent::Attendance(a) => Some(a.timestamp),
                     LiveEvent::Raw { .. } => None,
                 },
+                user_id_source: user_id_source(&q.event, q.user_id_source, false),
                 event: q.event,
                 source: q.source,
                 received_at: q.at,
@@ -520,6 +523,9 @@ pub(crate) struct Queued {
     pub(crate) event: LiveEvent,
     /// Live, or a backfilled record put back by `LiveCapture::stop`.
     pub(crate) source: Source,
+    /// Where the user ID came from, when already known (backfill reads
+    /// resolve it; live events are judged when delivered).
+    pub(crate) user_id_source: Option<UserIdSource>,
     /// Wall-clock arrival time.
     pub(crate) at: SystemTime,
     /// Monotonic arrival time.

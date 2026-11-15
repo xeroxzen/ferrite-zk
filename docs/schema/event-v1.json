@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xeroxzen/ferrite-zk/blob/main/docs/schema/event-v1.json",
+  "title": "zkctl attendance event, version 1",
+  "description": "One object printed by `zkctl attendance pull` and `zkctl live` (one per line with --output ndjson). The same shape for every source. A field added later updates this file without changing `v`, so consumers should ignore keys they do not know; a change that breaks consumers gets a new version and file.",
+  "type": "object",
+  "required": [
+    "v",
+    "id",
+    "device",
+    "source",
+    "device_time",
+    "received_at",
+    "kind",
+    "uid",
+    "user_id",
+    "user_id_source",
+    "status",
+    "status_code",
+    "punch",
+    "punch_code",
+    "workcode"
+  ],
+  "properties": {
+    "v": {
+      "description": "Schema version.",
+      "const": 1
+    },
+    "id": {
+      "description": "Deterministic identifier: the same punch has the same id whether pulled, live or backfilled. First 16 bytes of SHA-256, lowercase hex, over a length-prefixed encoding defined in docs/GUIDE.md. Deduplicate on it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "device": {
+      "description": "Profile name (-d), or the host when given with --host.",
+      "type": "string"
+    },
+    "source": {
+      "description": "pull: read from the log by `attendance pull`. live: a live event. backfill: read from the log by `live` after a reconnect or restart.",
+      "enum": [
+        "pull",
+        "live",
+        "backfill"
+      ]
+    },
+    "device_time": {
+      "description": "The device clock in the record, device-local with no time zone (YYYY-MM-DDTHH:MM:SS). Null for raw events.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+    },
+    "received_at": {
+      "description": "Host time the event arrived, RFC 3339 in UTC with milliseconds; for backfill, when the log was read. Null for pull.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "kind": {
+      "description": "attendance: a decoded punch. raw: an event this version does not decode; see `raw`.",
+      "enum": [
+        "attendance",
+        "raw"
+      ]
+    },
+    "uid": {
+      "description": "Device slot (internal index), when the record carries it or it was resolved.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "user_id": {
+      "description": "The user ID people see, when the record carries it or it was resolved.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user_id_source": {
+      "description": "Where user_id came from: record (the record itself) or user_table (looked up by uid). Null when unresolved, and for raw events.",
+      "enum": [
+        "record",
+        "user_table",
+        null
+      ]
+    },
+    "status": {
+      "description": "Verification method. Null for raw events.",
+      "enum": [
+        "password",
+        "fingerprint",
+        "card",
+        "face",
+        "unknown",
+        null
+      ]
+    },
+    "status_code": {
+      "description": "Verification method code as stored. Null for raw events.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 255
+    },
+    "punch": {
+      "description": "Punch state. Null for raw events.",
+      "enum": [
+        "check_in",
+        "check_out",
+        "break_out",
+        "break_in",
+        "overtime_in",
+        "overtime_out",
+        "unknown",
+        null
+      ]
+    },
+    "punch_code": {
+      "description": "Punch state code as stored. Null for raw events.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 255
+    },
+    "workcode": {
+      "description": "Work code, in layouts that have one.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "raw": {
+      "description": "Present only when kind is raw.",
+      "type": "object",
+      "required": [
+        "flags",
+        "payload_hex"
+      ],
+      "properties": {
+        "flags": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload_hex": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2})*$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "raw"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "raw"
+        ],
+        "properties": {
+          "user_id_source": {
+            "type": "null"
+          },
+          "user_id": {
+            "type": "null"
+          },
+          "uid": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "raw"
+          ]
+        },
+        "properties": {
+          "device_time": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_code": {
+            "type": "integer"
+          },
+          "punch": {
+            "type": "string"
+          },
+          "punch_code": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "pull"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "received_at": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "received_at": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

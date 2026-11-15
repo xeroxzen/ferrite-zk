@@ -76,7 +76,7 @@ pub use diag::{SampledPacket, StreamSample};
 pub use enroll::{EnrollOptions, EnrollOutcome};
 pub use error::{Error, Result};
 pub use live::{
-    CaptureOptions, CaptureStats, CapturedEvent, LiveCapture, ReconnectPolicy, Source, DEDUP_CAPACITY,
+    CaptureOptions, CaptureStats, CapturedEvent, LiveCapture, ReconnectPolicy, Resume, Source, DEDUP_CAPACITY,
 };
 pub use record::{Direction, RecordedPacket, Recording};
 pub use zkteco_proto;

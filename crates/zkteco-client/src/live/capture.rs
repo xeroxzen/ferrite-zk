@@ -11,7 +11,7 @@ use zkteco_proto::records::event::LiveEvent;
 use zkteco_proto::{requests, Command, EventFlags, Uid, UserId};
 
 use super::dedup::{Dedup, Key};
-use super::{CaptureOptions, CapturedEvent, Counters, Source, IDLE_TICK};
+use super::{user_id_source, CaptureOptions, CapturedEvent, Counters, Source, IDLE_TICK};
 use crate::client::{Client, Queued};
 use crate::error::{Error, Result};
 
@@ -51,6 +51,14 @@ pub(super) struct Capture {
 
 impl Capture {
     pub(super) fn new(client: Client, opts: CaptureOptions, counters: Arc<Counters>) -> Self {
+        let mut seen = Dedup::default();
+        let mut watermark = None;
+        if let Some(resume) = &opts.resume {
+            watermark = Some(resume.since);
+            for key in resume.delivered.iter().filter_map(Key::of) {
+                seen.insert(key);
+            }
+        }
         Self {
             client,
             opts,
@@ -62,8 +70,8 @@ impl Capture {
             failures: 0,
             ended: false,
             backfilled: VecDeque::new(),
-            watermark: None,
-            seen: Dedup::default(),
+            watermark,
+            seen,
             counters,
         }
     }
@@ -99,7 +107,9 @@ impl Capture {
     /// Resolve, deduplicate and timestamp an event. `None` for a duplicate.
     fn admit(&mut self, queued: Queued) -> Option<CapturedEvent> {
         let source = queued.source;
+        let carried = matches!(&queued.event, LiveEvent::Attendance(a) if a.user_id.is_some());
         let event = self.resolve(queued.event);
+        let user_id_source = user_id_source(&event, queued.user_id_source, !carried);
         let device_time = match &event {
             LiveEvent::Attendance(a) => {
                 if let Some(key) = Key::of(a) {
@@ -118,6 +128,7 @@ impl Capture {
         Some(CapturedEvent {
             event,
             source,
+            user_id_source,
             device_time,
             received_at: queued.at,
             received_instant: queued.instant,
@@ -216,6 +227,16 @@ impl Capture {
         Step::Idle
     }
 
+    /// With [`CaptureOptions::resume`] and backfill, queue what was stored
+    /// since the earlier capture stopped. Runs once, after the first
+    /// subscription.
+    pub(super) async fn resume(&mut self) -> Result<()> {
+        if self.opts.backfill && self.opts.resume.is_some() {
+            self.backfill().await?;
+        }
+        Ok(())
+    }
+
     /// Queue the attendance records stored since the watermark that were not
     /// delivered live. Runs after resubscribing, so nothing falls between
     /// the table read and the subscription.
@@ -233,6 +254,7 @@ impl Capture {
             let queued = Queued {
                 event: LiveEvent::Attendance(record.record),
                 source: Source::Backfill,
+                user_id_source: Some(record.source),
                 at,
                 instant,
             };
@@ -279,6 +301,7 @@ impl Capture {
             self.client.unpop_pending(Queued {
                 event: event.event,
                 source: event.source,
+                user_id_source: event.user_id_source,
                 at: event.received_at,
                 instant: event.received_instant,
             });

@@ -8,6 +8,7 @@ mod diagnose;
 mod enroll;
 mod info;
 mod live;
+mod live_state;
 mod templates;
 mod time;
 mod users;

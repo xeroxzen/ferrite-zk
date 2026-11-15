@@ -66,7 +66,9 @@ ferrite-zk/
 │       │   ├── target.rs      # -d/--host -> ClientConfig, password lookup, connect
 │       │   ├── profiles.rs    # config.toml
 │       │   ├── secrets.rs     # OS keyring, password prompt
-│       │   ├── output.rs      # human/json/ndjson records
+│       │   ├── output.rs      # human/json/ndjson; the event schema (docs/schema/)
+│       │   ├── event_id.rs    # deterministic event ids
+│       │   ├── files.rs       # atomic, durable file writes
 │       │   ├── exit.rs        # exit codes and error classification
 │       │   ├── diagnose.rs    # read-only survey -> COMPATIBILITY row
 │       │   ├── live_probe.rs  # diagnose --probe-live

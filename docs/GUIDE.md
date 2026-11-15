@@ -11,10 +11,11 @@ to the open questions in [DECISIONS.md](DECISIONS.md).
 2. [Transports](#transports)
 3. [Reliability semantics](#reliability-semantics)
 4. [Live capture in production](#live-capture-in-production)
-5. [Several devices](#several-devices)
-6. [Errors and exit codes](#errors-and-exit-codes)
-7. [Configuration and passwords](#configuration-and-passwords)
-8. [Data protection](#data-protection)
+5. [The event schema](#the-event-schema)
+6. [Several devices](#several-devices)
+7. [Errors and exit codes](#errors-and-exit-codes)
+8. [Configuration and passwords](#configuration-and-passwords)
+9. [Data protection](#data-protection)
 
 ## Getting started
 
@@ -135,22 +136,18 @@ default), so a device that loses power is noticed even when idle.
 punches as they happen.
 
 ```sh
-zkctl -d front live --reconnect --backfill --with-users --output ndjson
+zkctl -d front live --reconnect --backfill --state /var/lib/zkctl/live.json \
+    --with-users --output ndjson
 ```
 
 ```json
-{"device":"front","source":"live","received_at":"2026-01-02T03:04:05.120Z","device_time":"2026-01-02T03:04:05","kind":"attendance","uid":7,"user_id":"1001","status":"fingerprint","status_code":1,"punch":"check_in","punch_code":0,"workcode":null}
+{"v":1,"id":"28ae83f83bc20808c3d10e07af928880","device":"front","source":"live","device_time":"2026-01-02T03:04:05","received_at":"2026-01-02T03:04:05.120Z","kind":"attendance","uid":7,"user_id":"1001","user_id_source":"record","status":"fingerprint","status_code":1,"punch":"check_in","punch_code":0,"workcode":null}
 ```
 
-- `kind` is `attendance` for decoded punches, or `raw` (with `flags` and
-  `payload_hex`) for events this version does not decode. Raw events are
-  passed on, never dropped.
-- `source` is `live`, or `backfill` for punches read from the log after a
-  reconnect.
-- `device_time` is the device clock in the record; `received_at` is when
-  the host received it (for backfill, when the log was read). Order by
-  `device_time` within a device; do not compare it across devices whose
-  clocks may differ.
+Each line is one event in the [event schema](#the-event-schema). `source`
+is `live`, or `backfill` for punches read from the log after a reconnect or
+restart. Order by `device_time` within a device; do not compare it across
+devices whose clocks may differ.
 
 ### What happens when things go wrong
 
@@ -182,13 +179,46 @@ Backfill reads the whole log (the protocol has no "since" query), which
 takes a few seconds on a device with many records. It cannot recover
 punches the device never stored.
 
+### Surviving restarts: `--state`
+
+Backfill after a reconnect works from memory. To cover the time the
+process itself was not running, give `live` a state file:
+
+```sh
+zkctl -d front -d back live --reconnect --backfill --state /var/lib/zkctl/live.json --output ndjson
+```
+
+- Per device, the file records the newest device time emitted and the
+  punches emitted at that time (uid, user ID, verification method and
+  punch state). It is written atomically (temporary file, fsync, rename)
+  with mode 0600, at most `--state-flush` apart while events arrive
+  (default 1 s; `0` writes after every event), and on exit.
+- On start with `--backfill`, each device in the file is caught up first:
+  the log is read after subscribing, and every record at or after the
+  saved time that was not already emitted is emitted as `backfill`, before
+  any live event.
+- Only emitted events are recorded, so events dropped by `--count` are
+  caught up on the next run.
+- A missing file starts fresh. An unreadable or corrupt one is reported on
+  standard error and replaced; the stream starts anyway.
+- After a clean stop (SIGINT, `--count`, `--duration`), each punch is
+  emitted exactly once across runs. After a crash or SIGKILL, punches
+  emitted within the last `--state-flush` before it may be emitted again
+  (at-least-once); deduplicate on `id` (see
+  [Deduplicating](#deduplicating-on-id)).
+- Records stored with a device time earlier than the saved one (after the
+  device clock was set back) are not caught up.
+
 ### Stopping
 
 Ctrl-C (or SIGINT from a supervisor) unsubscribes from every device, prints
-any events that arrived meanwhile, and exits 0. Kill with SIGTERM or SIGKILL
-and the device stays subscribed to a dead connection until it notices;
-nothing is lost from the device's log, but events in flight are. `--count N`
-stops after N events; `--duration 8h` after a time.
+any events that arrived meanwhile, saves the state file, and exits 0. Kill
+with SIGTERM or SIGKILL and the device stays subscribed to a dead
+connection until it notices; nothing is lost from the device's log, and
+`--state` with `--backfill` recovers it on the next start. `--duration 8h`
+stops after a time. `--count N` stops after N events; events that arrive
+while it unsubscribes are not emitted, and their number is reported on
+standard error.
 
 ### Running it as a service
 
@@ -197,10 +227,7 @@ stops after N events; `--duration 8h` after a time.
   stops it with SIGINT.
 - Read standard output line by line; each line is one complete JSON
   object. Logs go to standard error.
-- After a restart of the process itself, backfill does not cover the gap
-  (the watermark lives in memory). Close it with
-  `attendance pull --state FILE` on start, which emits only records after
-  the previous run's.
+- Add `--state FILE` so a restart catches up on what it missed.
 - For incremental export without streaming, run
   `zkctl -d front attendance pull --state /var/lib/zkctl/front.json --output ndjson`
   from cron.
@@ -211,6 +238,87 @@ In a Rust program, use `LiveCapture` directly: see
 `tokio::select!` without losing an event. `LiveCapture::stop` returns the
 `Client`; `Client::take_pending_captured` then yields the events that
 arrived during the stop, with their source.
+
+## The event schema
+
+`attendance pull` and `live` print the same object for every record, from
+every source. The formal definition is
+[docs/schema/event-v1.json](schema/event-v1.json) (JSON Schema 2020-12);
+the tests validate real output against it.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `v` | integer | Schema version, `1` |
+| `id` | string | Deterministic identifier, 32 lowercase hex digits; see [Deduplicating](#deduplicating-on-id) |
+| `device` | string | Profile name (`-d`), or the host with `--host` |
+| `source` | string | `pull`, `live`, or `backfill` (read from the log by `live`) |
+| `device_time` | string or null | Device clock in the record, `YYYY-MM-DDTHH:MM:SS`, device-local, no zone. Null for raw events |
+| `received_at` | string or null | Host arrival time, RFC 3339 UTC with milliseconds; for backfill, when the log was read. Null for `pull` |
+| `kind` | string | `attendance`, or `raw` for an event this version does not decode |
+| `uid` | integer or null | Device slot, when the record has it or it was resolved (`--with-users`) |
+| `user_id` | string or null | The user ID people see, when known |
+| `user_id_source` | string or null | `record` (the record carries it) or `user_table` (looked up by uid, `--with-users`). Null when unresolved, and for raw events |
+| `status` | string or null | Verification method: `password`, `fingerprint`, `card`, `face`, `unknown` |
+| `status_code` | integer or null | The method code as stored |
+| `punch` | string or null | `check_in`, `check_out`, `break_out`, `break_in`, `overtime_in`, `overtime_out`, `unknown` |
+| `punch_code` | integer or null | The punch code as stored |
+| `workcode` | integer or null | Work code, in layouts that have one |
+| `raw` | object | Only when `kind` is `raw`: `{"flags": integer, "payload_hex": string}` |
+
+Every key except `raw` is always present. For `kind: attendance`,
+`device_time`, `status`, `status_code`, `punch` and `punch_code` are never
+null; for `raw` they are. Which of `uid` and `user_id` a record carries
+depends on the device's layout; `--with-users` fills in the other from the
+user table.
+
+Compatibility: a field may be added without changing `v`, so ignore keys
+you do not know. Removing or renaming a field, or changing its type or
+meaning, would be version 2, with a new schema file. `--output json`
+prints the same objects in one array (`attendance pull` only).
+
+### Deduplicating on `id`
+
+`id` identifies a punch, not a line of output: the same punch has the same
+`id` whether it comes from `attendance pull`, a live event or backfill, in
+any run. Delivery is at-least-once in two places, so consumers that store
+events should treat `id` as a unique key and ignore repeats:
+
+- `live --state` after a crash or SIGKILL re-emits what was emitted in the
+  last `--state-flush` interval before it.
+- `attendance pull` without `--state` emits the whole log every time, and
+  overlaps with `live`.
+
+What goes into `id`, so you can recompute it: the first 16 bytes of
+SHA-256, as lowercase hex, over a sequence of fields, each preceded by its
+length as an 8-byte big-endian integer.
+
+- `kind: attendance`: `zkctl-event-v1`, `attendance`, `device`,
+  `device_time`, the person (`user_id:` and the user ID if there is one,
+  otherwise `uid:` and the uid, otherwise empty), the status code as one
+  byte, the punch code as one byte.
+- `kind: raw`: `zkctl-event-v1`, `raw`, `device`, the flags as a 4-byte
+  big-endian integer, the payload bytes.
+
+For example, user ID `1001` at `2026-01-02T03:04:05` on device `front`,
+fingerprint (1), check-in (0), is `28ae83f83bc20808c3d10e07af928880`, with
+or without a uid.
+
+Limits, because the device log has no identifier of its own:
+
+- **Identical punches in one second.** The device records time to the
+  second. Two punches by the same person, with the same method and punch
+  state, in the same second, get the same `id` and are indistinguishable;
+  `live` emits them once, and deduplicating on `id` keeps one. Two different
+  people, methods or punch states in the same second get different ids.
+- **The person must be named the same way.** When a user ID is known it is
+  used, and the uid ignored, because live events on some layouts carry only
+  the user ID. A log layout without user IDs (8 bytes) names the person by
+  uid unless `--with-users` fills the user ID in, so pull such devices with
+  `--with-users` (and run `live --with-users`) to get matching ids.
+- **`device` is part of it.** Renaming a profile, or switching between
+  `-d NAME` and `--host`, changes every id for that device.
+- Raw events with the same flags and payload from one device share an
+  `id`.
 
 ## Several devices
 
@@ -303,6 +411,8 @@ under GDPR article 9, BIPA and similar laws.
   it no longer than needed, and do not send it anywhere it is not needed.
 - `templates import --dry-run` prints the packets with template payloads
   redacted.
+- `attendance pull --state` and `live --state` files hold user IDs and
+  uids of recent punches; they are written with mode 0600.
 - `diagnose` reports scrub serial numbers and MACs unless
   `--include-identifiers` is given, and contain no user records. Its packet
   captures replace names, IDs, cards, PINs and timestamps with synthetic

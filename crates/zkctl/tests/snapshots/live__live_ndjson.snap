@@ -6,6 +6,7 @@ expression: lines
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
+    "id": "a5fb84bd35dd233800383eef55f43159",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -15,11 +16,14 @@ expression: lines
     "status_code": 1,
     "uid": null,
     "user_id": "1",
+    "user_id_source": "record",
+    "v": 1,
     "workcode": null
   },
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
+    "id": "223e4b2599a9ec3da812f8983e00889f",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -29,11 +33,14 @@ expression: lines
     "status_code": 1,
     "uid": null,
     "user_id": "2",
+    "user_id_source": "record",
+    "v": 1,
     "workcode": null
   },
   {
     "device": "[host]",
     "device_time": "2026-01-02T03:04:05",
+    "id": "bc39fe566c9a6235effcbe725de8dd1f",
     "kind": "attendance",
     "punch": "check_in",
     "punch_code": 0,
@@ -43,6 +50,8 @@ expression: lines
     "status_code": 1,
     "uid": null,
     "user_id": "3",
+    "user_id_source": "record",
+    "v": 1,
     "workcode": null
   }
 ]

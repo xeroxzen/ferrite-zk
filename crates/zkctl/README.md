@@ -16,7 +16,7 @@ zkctl device add front --host 192.168.1.201
 zkctl device set-password front          # stored in the OS keyring
 zkctl -d front info
 zkctl -d front attendance pull --since 24h --output ndjson
-zkctl -d front -d back live --reconnect --backfill --output ndjson
+zkctl -d front -d back live --reconnect --backfill --state live.json --output ndjson
 ```
 
 ## Commands
@@ -27,7 +27,7 @@ zkctl -d front -d back live --reconnect --backfill --output ndjson
 | `time get` | Print the device clock |
 | `users list` | List users (`--filter`) |
 | `attendance pull` | Export attendance (`--since`, `--until`, `--with-users`, `--state` for incremental export); several `-d` at once |
-| `live` | Stream live events until Ctrl-C (`--reconnect`, `--backfill`, `--with-users`); several `-d` merged |
+| `live` | Stream live events until Ctrl-C (`--reconnect`, `--backfill`, `--state` to catch up after a restart, `--with-users`); several `-d` merged |
 | `diagnose` | Survey a device and print a report for the compatibility table |
 | `time set` | **Destructive.** Set the clock (`<RFC 3339>` or `--sync`) |
 | `users add`, `update`, `delete` | **Destructive.** Change users, by `--user-id` or `--uid` |
@@ -49,7 +49,10 @@ sends no writes. The clears also ask for the device name to be typed (or
 
 Data goes to standard output, logs to standard error (`-v`, `-vv`, `-q`).
 `--output json` gives one JSON document; `--output ndjson` one object per
-line, for streams and record lists. The machine formats are stable.
+line, for streams and record lists. Attendance records and live events
+share one versioned schema, documented in the
+[guide](https://github.com/xeroxzen/ferrite-zk/blob/main/docs/GUIDE.md#the-event-schema)
+and [as JSON Schema](https://github.com/xeroxzen/ferrite-zk/blob/main/docs/schema/event-v1.json).
 
 | Code | Meaning |
 |---|---|

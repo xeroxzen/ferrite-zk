@@ -15,6 +15,7 @@ use assert_cmd::assert::Assert;
 use serde_json::Value;
 use support::{punches, templates, users, DeviceState, MockDevice};
 use zkteco_client::READ_ONLY_COMMANDS;
+use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::Command;
 
 /// A temporary home for the config and state files.
@@ -97,6 +98,15 @@ fn stdout(a: &Assert) -> String {
 
 fn stderr(a: &Assert) -> String {
     String::from_utf8(a.get_output().stderr.clone()).unwrap()
+}
+
+/// Fail unless `event` matches docs/schema/event-v1.json.
+fn assert_event_schema(event: &Value) {
+    let schema: Value = serde_json::from_str(include_str!("../../../docs/schema/event-v1.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("the schema is valid");
+    if let Err(e) = validator.validate(event) {
+        panic!("{e}: {event}");
+    }
 }
 
 fn json(a: &Assert) -> Value {
@@ -306,7 +316,12 @@ async fn attendance_pull_formats() {
         .await
         .code(0);
     let first = &lines(&a)[0];
-    assert_eq!(first["timestamp"], "2026-01-01T08:00:00");
+    assert_eq!(first["device_time"], "2026-01-01T08:00:00");
+    assert_eq!(
+        (&first["v"], &first["source"], &first["received_at"]),
+        (&1.into(), &"pull".into(), &Value::Null)
+    );
+    lines(&a).iter().for_each(assert_event_schema);
     insta::assert_snapshot!(
         "attendance_pull_ndjson",
         stdout(&a).replace(
@@ -331,7 +346,7 @@ async fn attendance_pull_filters_by_time() {
         .run(&pull("2026-01-01T08:01:00", "2026-01-01T08:03:00"))
         .await
         .code(0);
-    let times: Vec<Value> = lines(&a).iter().map(|r| r["timestamp"].clone()).collect();
+    let times: Vec<Value> = lines(&a).iter().map(|r| r["device_time"].clone()).collect();
     assert_eq!(times, ["2026-01-01T08:01:00", "2026-01-01T08:02:00"]);
     // The device clock reads 2026-01-02T03:04:05: 20 hours back is 07:04.
     let a = env.run(&pull("20h", "1s")).await.code(0);
@@ -371,7 +386,7 @@ async fn attendance_pull_state_is_incremental() {
         ))
         .await
         .code(0);
-    let new: Vec<Value> = lines(&a).iter().map(|r| r["timestamp"].clone()).collect();
+    let new: Vec<Value> = lines(&a).iter().map(|r| r["device_time"].clone()).collect();
     assert_eq!(new, ["2026-01-01T08:04:00", "2026-01-01T08:05:00"]);
 }
 
@@ -386,6 +401,41 @@ async fn attendance_pull_reports_rejected_records() {
         .code(6);
     assert_eq!(json(&a).as_array().unwrap().len(), 3);
     assert!(stderr(&a).contains("rejected"), "{}", stderr(&a));
+}
+
+/// A log without user IDs (the 8-byte layout): `--with-users` fills them in
+/// from the user table and says so; without it they stay null.
+#[tokio::test]
+async fn user_id_source_shows_where_ids_came_from() {
+    let env = Env::new();
+    let dev = device().await;
+    dev.state().attendance_format = AttendanceFormat::Short8;
+    let host = at(&dev);
+    let a = env
+        .run(&args(&host, &["attendance", "pull", "--output", "ndjson"]))
+        .await
+        .code(0);
+    let plain = &lines(&a)[0];
+    assert_eq!(
+        (&plain["user_id"], &plain["user_id_source"]),
+        (&Value::Null, &Value::Null)
+    );
+    let a = env
+        .run(&args(
+            &host,
+            &["attendance", "pull", "--with-users", "--output", "ndjson"],
+        ))
+        .await
+        .code(0);
+    let resolved = &lines(&a)[0];
+    assert_eq!(resolved["user_id"], "1001");
+    assert_eq!(resolved["user_id_source"], "user_table");
+    assert_ne!(
+        plain["id"], resolved["id"],
+        "the person is a uid in one, a user ID in the other"
+    );
+    assert_event_schema(plain);
+    assert_event_schema(resolved);
 }
 
 #[tokio::test]
@@ -410,7 +460,7 @@ async fn attendance_pull_from_several_devices() {
         .code(0);
     let devices: Vec<Value> = lines(&a).iter().map(|r| r["device"].clone()).collect();
     assert_eq!(devices, ["front", "front", "front", "front", "back"]);
-    assert_eq!(lines(&a)[0]["user_id_source"], "record");
+    assert_eq!(lines(&a)[0]["source"], "pull");
 }
 
 #[tokio::test]

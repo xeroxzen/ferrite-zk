@@ -8,11 +8,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
-use support::{DeviceState, MockDevice};
+use support::{event_with, DeviceState, MockDevice};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command as Process};
 use zkteco_client::READ_ONLY_COMMANDS;
-use zkteco_proto::Command;
+use zkteco_proto::{Command, EventFlags};
 
 fn zkctl(config: &std::path::Path, args: &[String]) -> Child {
     Process::new(env!("CARGO_BIN_EXE_zkctl"))
@@ -71,6 +71,38 @@ async fn finish(child: Child) -> (Vec<Value>, i32, String) {
     (lines, out.status.code().unwrap_or(-1), stderr)
 }
 
+/// Fail unless `event` matches docs/schema/event-v1.json.
+fn assert_event_schema(event: &Value) {
+    let schema: Value = serde_json::from_str(include_str!("../../../docs/schema/event-v1.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("the schema is valid");
+    if let Err(e) = validator.validate(event) {
+        panic!("{e}: {event}");
+    }
+}
+
+/// The next stdout line, as JSON.
+async fn next_line(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>) -> Value {
+    let line = tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+        .await
+        .expect("a line in time")
+        .unwrap()
+        .expect("stdout still open");
+    serde_json::from_str(&line).unwrap()
+}
+
+/// `(user_id, source)` of each event.
+fn punches_of(lines: &[Value]) -> Vec<(String, String)> {
+    lines
+        .iter()
+        .map(|l| {
+            (
+                l["user_id"].as_str().unwrap().to_owned(),
+                l["source"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// Only read-only commands, plus the subscription itself.
 fn assert_live_read_only(dev: &MockDevice) {
     for c in dev.commands() {
@@ -92,6 +124,7 @@ async fn streams_ndjson_and_unsubscribes() {
     dev.push_events(3);
     let (mut lines, code, stderr) = finish(child).await;
     assert_eq!(code, 0, "{stderr}");
+    lines.iter().for_each(assert_event_schema);
     for l in &mut lines {
         assert!(l["received_at"].as_str().unwrap().ends_with('Z'));
         l["received_at"] = "[received_at]".into();
@@ -184,6 +217,10 @@ async fn merges_devices_across_a_reconnect() {
         "ndjson",
         "--count",
         "7",
+        // A backstop: a missing event then fails the assertions below,
+        // showing what arrived, instead of timing out.
+        "--duration",
+        "10s",
     ]);
     let child = zkctl(&config, &args);
     subscribed(&front, 1).await;
@@ -233,4 +270,199 @@ async fn merges_devices_across_a_reconnect() {
     assert_eq!(back.state().connections, 2);
     assert_live_read_only(&front);
     assert_live_read_only(&back);
+}
+
+#[tokio::test]
+async fn raw_events_match_the_schema() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = strings(&["live", "--output", "ndjson", "--count", "1"]);
+    args.extend(host(&dev));
+    let child = zkctl(&dir.path().join("c.toml"), &args);
+    subscribed(&dev, 1).await;
+    dev.push_packets(vec![event_with(EventFlags::ALARM, &[55, 0, 0, 0])]);
+    let (lines, code, stderr) = finish(child).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines[0]["kind"], "raw");
+    assert_eq!(lines[0]["raw"]["payload_hex"], "37000000");
+    assert_event_schema(&lines[0]);
+}
+
+#[tokio::test]
+async fn count_reports_events_left_unemitted() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = strings(&["live", "--output", "ndjson", "--count", "3"]);
+    args.extend(host(&dev));
+    let child = zkctl(&dir.path().join("c.toml"), &args);
+    subscribed(&dev, 1).await;
+    dev.push_events(5);
+    let (lines, code, stderr) = finish(child).await;
+    assert_eq!((lines.len(), code), (3, 0), "{stderr}");
+    assert!(
+        stderr.contains(
+            "stopped after 3 events; 2 further events arrived while unsubscribing and were not emitted"
+        ),
+        "{stderr}"
+    );
+}
+
+/// `live --state` arguments for `dev`, stopping after `count` events if
+/// given.
+fn stateful(dev: &MockDevice, state: &std::path::Path, count: Option<&str>) -> Vec<String> {
+    let mut args = strings(&[
+        "live",
+        "--reconnect",
+        "--backfill",
+        "--state",
+        state.to_str().unwrap(),
+        "--state-flush",
+        "0",
+        "--output",
+        "ndjson",
+    ]);
+    if let Some(n) = count {
+        args.extend(strings(&["--count", n]));
+    }
+    args.extend(host(dev));
+    args
+}
+
+/// Wait until the state file lists `n` delivered punches.
+async fn state_holds(path: &std::path::Path, n: usize) {
+    for _ in 0..500 {
+        let held = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| {
+                let devices = v["devices"].as_object()?.clone();
+                Some(
+                    devices
+                        .values()
+                        .map(|d| d["delivered"].as_array().map_or(0, Vec::len))
+                        .sum::<usize>(),
+                )
+            });
+        if held == Some(n) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "state never held {n} punches: {:?}",
+        std::fs::read_to_string(path)
+    );
+}
+
+/// Killed mid-stream (no chance to save or unsubscribe), restarted after
+/// punches were stored meanwhile: every punch is emitted exactly once
+/// across the two runs, the missed ones as backfill.
+#[tokio::test]
+async fn restart_after_a_kill_emits_each_punch_once() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, state) = (dir.path().join("c.toml"), dir.path().join("live.json"));
+
+    let mut first = zkctl(&config, &stateful(&dev, &state, None));
+    subscribed(&dev, 1).await;
+    dev.push_events(2);
+    let mut reader = BufReader::new(first.stdout.take().unwrap()).lines();
+    let mut before = vec![next_line(&mut reader).await, next_line(&mut reader).await];
+    state_holds(&state, 2).await;
+    first.start_kill().unwrap();
+    first.wait().await.unwrap();
+    assert_eq!(dev.state().event_masks, [1], "killed without unsubscribing");
+
+    dev.record_offline(3);
+    let second = zkctl(&config, &stateful(&dev, &state, Some("4")));
+    subscribed(&dev, 2).await;
+    dev.push_events(1);
+    let (after, code, stderr) = finish(second).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    assert_eq!(
+        punches_of(&before),
+        [("1".into(), "live".into()), ("2".into(), "live".into())]
+    );
+    let after_punches = punches_of(&after);
+    let missed: Vec<_> = after_punches.iter().take(3).cloned().collect();
+    let backfill = |u: &str| (u.to_owned(), "backfill".to_owned());
+    assert_eq!(missed, [backfill("3"), backfill("4"), backfill("5")]);
+    assert_eq!(
+        after_punches[3].0, "6",
+        "then the live punch (live or backfill, as it raced the log read)"
+    );
+    before.extend(after);
+    let users: BTreeSet<String> = punches_of(&before).into_iter().map(|(u, _)| u).collect();
+    assert_eq!((before.len(), users.len()), (6, 6), "each punch exactly once");
+    state_holds(&state, 6).await;
+}
+
+#[tokio::test]
+async fn a_corrupt_state_file_is_replaced() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, state) = (dir.path().join("c.toml"), dir.path().join("live.json"));
+    std::fs::write(&state, "{ not json").unwrap();
+    let child = zkctl(&config, &stateful(&dev, &state, Some("1")));
+    subscribed(&dev, 1).await;
+    dev.push_events(1);
+    let (lines, code, stderr) = finish(child).await;
+    assert_eq!((lines.len(), code), (1, 0), "{stderr}");
+    assert!(
+        stderr.contains("is corrupt") && stderr.contains("starting fresh"),
+        "{stderr}"
+    );
+    state_holds(&state, 1).await;
+}
+
+/// One punch reaching zkctl three ways (live, backfill from a resumed
+/// state, and `attendance pull`) carries one `id`, while the live event has
+/// no uid and the log record has one.
+#[tokio::test]
+async fn the_same_punch_has_one_id_however_it_arrives() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, state) = (dir.path().join("c.toml"), dir.path().join("live.json"));
+
+    let mut args = strings(&["live", "--output", "ndjson", "--count", "1"]);
+    args.extend(host(&dev));
+    let child = zkctl(&config, &args);
+    subscribed(&dev, 1).await;
+    dev.push_events(1);
+    let (live, code, stderr) = finish(child).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // A state from before the punch, so the restart backfills it.
+    let at = serde_json::to_value(dev.state().time).unwrap();
+    let device = dev.addr.ip().to_string();
+    let resume = serde_json::json!({"v": 1, "devices": {device: {"device_time": at, "delivered": []}}});
+    std::fs::write(&state, resume.to_string()).unwrap();
+    let child = zkctl(&config, &stateful(&dev, &state, Some("1")));
+    let (backfill, code, stderr) = finish(child).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let mut args = strings(&["attendance", "pull", "--output", "ndjson"]);
+    args.extend(host(&dev));
+    let (pulled, code, stderr) = finish(zkctl(&config, &args)).await;
+    assert_eq!(code, 0, "{stderr}");
+    let pulled: Vec<&Value> = pulled.iter().filter(|r| r["user_id"] == "1").collect();
+
+    let (l, b, p) = (&live[0], &backfill[0], pulled[0]);
+    assert_eq!(
+        [&l["source"], &b["source"], &p["source"]],
+        [&Value::from("live"), &"backfill".into(), &"pull".into()]
+    );
+    assert_eq!(
+        (&l["uid"], &p["uid"]),
+        (&Value::Null, &Value::from(1)),
+        "the shapes differ"
+    );
+    assert_eq!(l["id"], b["id"]);
+    assert_eq!(l["id"], p["id"]);
+    for e in [l, b, p] {
+        assert_eq!(e["user_id_source"], "record");
+        assert_event_schema(e);
+    }
 }

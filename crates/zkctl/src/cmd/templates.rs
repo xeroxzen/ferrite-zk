@@ -3,7 +3,6 @@
 //! export files are written with mode 0600 and never printed.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -120,7 +119,7 @@ async fn export(g: &Global, t: &Target, out: &Path, dry_run: bool) -> Result<Exi
         exported_at: output::host_time(std::time::SystemTime::now()),
         entries,
     };
-    write_private(out, &serde_json::to_vec_pretty(&file)?)?;
+    crate::files::write_atomic(out, &serde_json::to_vec_pretty(&file)?)?;
     summary(
         g.output,
         &format!("wrote {count} templates to {} (mode 0600)", out.display()),
@@ -157,29 +156,6 @@ fn group(users: &[User], templates: Vec<Template>) -> (Vec<Entry>, usize) {
         }
     }
     (entries, by_uid.values().map(Vec::len).sum())
-}
-
-/// Write `bytes` to `path` readable by the owner only, replacing it.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut f = options
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
 async fn import(g: &Global, t: &Target, path: &Path, dry_run: bool) -> Result<Exit> {

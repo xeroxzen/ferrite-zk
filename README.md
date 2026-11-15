@@ -41,7 +41,7 @@ zkctl device set-password front                 # comm key, in the OS keyring
 zkctl -d front info
 zkctl -d front users list --output json
 zkctl -d front attendance pull --since 24h --output ndjson
-zkctl -d front -d back live --reconnect --backfill --output ndjson
+zkctl -d front -d back live --reconnect --backfill --state live.json --output ndjson
 ```
 
 Library:

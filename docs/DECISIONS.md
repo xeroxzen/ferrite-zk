@@ -590,7 +590,8 @@ list.
   Enrolment that ends in anything but "stored" exits 5.
 - **Output.** `--output json` is one document, `ndjson` one object per
   line; `live` refuses `json` (exit 2), since a stream has no end to close
-  a document at. Field sets are pinned by snapshot tests. Device times are
+  a document at. Field sets are pinned by snapshot tests; attendance
+  records and events follow one schema (D34). Device times are
   printed without an offset (the device has no time zone); host times are
   UTC with milliseconds. PINs are never printed (`has_password` instead),
   except inside a template export file, which needs them to recreate users.
@@ -601,7 +602,8 @@ list.
   (`Client::take_pending_captured`, which keeps each event's source, so
   undelivered backfill stays `backfill`). With `--reconnect`, attempts are
   unlimited and the first connection is retried too; a rejected password
-  is never retried. `--count N` drops events after the Nth while stopping.
+  is never retried. `--count N` drops events after the Nth while stopping
+  and reports how many on stderr.
 - **`attendance pull --state FILE`.** A JSON cursor per device: the last
   record emitted (user, time, status, punch). The next run emits records
   after that record's position in the log; if it is no longer in the log
@@ -633,14 +635,114 @@ list.
 ## D33. Release preparation
 
 - `cargo-deny` (`deny.toml`): permissive licenses only (MIT, Apache-2.0,
-  BSD-3-Clause, Unicode-3.0, and MPL-2.0 for `option-ext`, unmodified,
-  file-level copyleft), nothing GPL; advisories deny, with the three
-  ignores in D32; duplicate versions warn; crates.io only.
+  BSD-3-Clause, Unicode-3.0, Zlib, and MPL-2.0 for `option-ext` only,
+  unmodified, file-level copyleft), nothing GPL; advisories deny, with the
+  three ignores in D32, to be rechecked by 2027-02-15; duplicate versions
+  warn; crates.io only.
 - `zkctl`'s tests use the mock device from `zkteco-client/tests` via
   `#[path]`, so they are excluded from its package; they run in this
   repository only.
 - Library crates use `#![deny(missing_docs)]`; CI builds docs with
   `-D rustdoc::broken_intra_doc_links`.
+
+## D34. One event schema (after the phase 6 review)
+
+- `attendance pull` and `live` (live and backfill) print one object shape:
+  `v`, `id` (D36), `device`, `source` (`pull`, `live`, `backfill`),
+  `device_time`, `received_at` (null for pull), `kind`, `uid`, `user_id`,
+  `user_id_source`, `status`, `status_code`, `punch`, `punch_code`,
+  `workcode`. Every key is always
+  present, so consumers need no per-source parsing. Pull's `timestamp`
+  became `device_time`.
+- `kind: raw` events also carry `raw: {flags, payload_hex}`, and only they
+  do; their attendance fields are null. Raw events cannot be dropped (D9)
+  and their bytes have to go somewhere; one optional key keeps attendance
+  objects exactly the listed shape.
+- `user_id_source` is on every object: `record`, `user_table`, or null
+  (unresolved, and raw events). Pull without `--with-users` reports
+  `record` when the record has a user ID. For live events the client now
+  says where the ID came from (`CapturedEvent::user_id_source`): the event,
+  the user table (`resolve_users`, or backfill's read, which always
+  resolves), or nowhere. (It was briefly dropped in review and restored
+  before v1 was published.)
+- `v` is the schema version, 1. Added fields keep it; removed, renamed or
+  retyped fields would make version 2. The formal definition is
+  `docs/schema/event-v1.json` (JSON Schema 2020-12, with conditions for
+  `raw` and `pull`), and the CLI tests validate real `pull`, `live` and raw
+  output against it with the `jsonschema` crate (a dev-dependency only).
+
+## D35. `live --state` (after the phase 6 review)
+
+- The client gained `CaptureOptions::resume: Option<Resume>` with
+  `Resume { since, delivered }`. It sets the backfill watermark before the
+  first subscription and seeds the duplicate filter with `delivered`. With
+  `backfill`, the first subscription then backfills from `since` (after
+  `CMD_REG_EVENT`, so nothing falls between), before any live event. No
+  protocol behaviour changed.
+- The CLI keeps, per device, the newest device time it has *emitted* and
+  the punches emitted at exactly that time (uid, user ID, status code,
+  punch code; at most 4,096). All punches in a second share a device time,
+  so the time alone would re-emit some or skip others; a list of the
+  punches at that time, used as dedup keys, gives exactly once. A record
+  older than the watermark leaves it unchanged.
+- The state is written by the printer, after the line is flushed to
+  stdout, so the file never runs ahead of the output. Writes are atomic
+  and durable (temporary file, `sync_all`, rename, directory sync; mode
+  0600), at most `--state-flush` (default 1 s, `0` for every event) apart
+  while events arrive, and on exit. A failed write is reported and retried
+  at the next one; a failed final write exits 1.
+- Guarantee: exactly once across a clean stop and restart; after a crash,
+  punches emitted within the last flush interval may be emitted again
+  (at-least-once). A missing state file starts fresh; an unreadable,
+  corrupt or other-version one is reported on stderr and replaced, never
+  fatal.
+- `--state` without `--backfill` still records the watermark but does not
+  catch up. `--backfill` still needs `--reconnect`.
+- `attendance pull --state` and template exports now use the same atomic
+  write (pull's cursor gained the fsyncs and mode 0600).
+
+## D36. Event `id`
+
+- `id` is the first 16 bytes of SHA-256 (lowercase hex) over
+  length-prefixed fields (8-byte big-endian lengths, so field boundaries
+  cannot shift): `zkctl-event-v1`, the kind, the device, then for
+  attendance the device time, the person, the status code and the punch
+  code; for raw events the flags (4 bytes) and the payload. The exact
+  encoding is in docs/GUIDE.md and `zkctl::event_id`, with a pinned test
+  vector that was also reproduced independently from the documentation.
+- The person is `user_id:<id>` when a user ID is known, else `uid:<n>`.
+  Hashing both, as first specified, would give one punch two ids: live
+  events in the 12-byte layout carry only the user ID, the log carries
+  both. This matches the live duplicate filter's key (D31). A log layout
+  with no user ID names the person by uid unless `--with-users` resolves
+  it; the guide tells users to resolve on such devices.
+- `user_id_source`, `uid`, `workcode`, `source` and arrival time are not
+  in the hash: they describe how the punch was read, not which punch it
+  is.
+- Identical punches (person, second, method, state) share an `id`; the
+  log has nothing else to tell them apart (the same limit as D31's
+  dedup). Delivery is at-least-once after a crash (D35) and across pull and
+  live, so consumers deduplicate on `id`.
+- SHA-256 via `sha2` (already in the lock file through a dev-dependency),
+  over BLAKE3: one fewer new crate, and recomputable with any standard
+  library. Changing the encoding changes every id, so it would need schema
+  version 2.
+
+## Known issues
+
+- **`merges_devices_across_a_reconnect` (zkctl `tests/live.rs`) hung once.**
+  On 2026-11-15, during phase 6 review work, it failed one of 12
+  consecutive runs of the live test suite: the second device's events
+  never all arrived, and the test hit its 20 s wait. It then passed 25
+  runs alone, 30 runs of the live suite, 30 runs of the whole zkctl suite,
+  and 15 runs of the live suite with eight CPU-bound processes running
+  (100 runs, no failure; it also passed 5 of 5 in phase 5). Hypothesis,
+  unconfirmed: under load, a reply timeout (the test profile uses 500 ms)
+  during the reconnect or the backfill read fails an attempt, and the
+  reconnect backoff (1 s, doubling) pushes completion past 20 s. The
+  test now passes `--duration 10s`, so a recurrence ends with the events
+  received and fails on the assertions showing which are missing. Not
+  fixed; to be revisited if it recurs.
 
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 

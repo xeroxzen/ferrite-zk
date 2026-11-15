@@ -89,10 +89,7 @@ pub(super) fn load(path: &Path) -> Result<StateFile> {
 
 /// Write the state file atomically.
 pub(super) fn save(path: &Path, state: &StateFile) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(state)? + "\n")
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    crate::files::write_atomic(path, (serde_json::to_string_pretty(state)? + "\n").as_bytes())
 }
 
 #[cfg(test)]

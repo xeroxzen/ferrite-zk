@@ -339,8 +339,19 @@ pub struct LiveArgs {
     #[arg(long)]
     pub reconnect: bool,
     /// After a reconnect, deliver the punches stored while disconnected.
+    /// With `--state`, also on start: those stored since the previous run.
     #[arg(long, requires = "reconnect")]
     pub backfill: bool,
+    /// State file: per device, the last events emitted, saved atomically as
+    /// they are emitted. With `--backfill`, a restart resumes from it. A
+    /// missing or corrupt file is reported and replaced.
+    #[arg(long, value_name = "FILE")]
+    pub state: Option<PathBuf>,
+    /// Longest wait between state saves while events arrive (`0` saves
+    /// after every event). On a crash, events emitted within this window
+    /// may be emitted again after the restart.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration, default_value = "1s", requires = "state")]
+    pub state_flush: Duration,
     /// Stop after this many events.
     #[arg(long)]
     pub count: Option<u64>,

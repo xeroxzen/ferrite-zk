@@ -8,6 +8,8 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use zkteco_client::zkteco_proto::packet::Packet;
 use zkteco_client::{Attendance, CapturedEvent, LiveEvent, Privilege, Source, User, UserIdSource};
+
+use crate::event_id;
 use zkteco_proto::records::attendance::{AttendanceStatus, Punch};
 
 use crate::cli::Format;
@@ -72,38 +74,138 @@ pub fn privilege_name(p: Privilege) -> String {
     }
 }
 
-/// The fields of an attendance record, shared by `attendance pull` and
-/// `live`.
+/// Version of the event schema (docs/schema/event-v1.json). Bumped only
+/// for changes that break consumers; added fields do not bump it.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// One attendance record or live event: the object `attendance pull` and
+/// `live` print, the same for every source (DECISIONS.md D34). Every key is
+/// always present, except `raw`, which only undecoded events have.
 #[derive(Debug, Clone, Serialize)]
-pub struct Punched {
+pub struct EventOut {
+    /// Schema version, [`SCHEMA_VERSION`].
+    pub v: u32,
+    /// Deterministic identifier: the same punch has the same `id` whether
+    /// pulled, live or backfilled ([`crate::event_id`]).
+    pub id: String,
+    /// The device (profile name or host).
+    pub device: String,
+    /// `pull`, `live`, or `backfill` (read from the log by `live`).
+    pub source: &'static str,
+    /// Device clock in the record, device-local, no zone; `null` for raw
+    /// events.
+    pub device_time: Option<String>,
+    /// Host time the event arrived (RFC 3339, UTC); `null` for `pull`.
+    pub received_at: Option<String>,
+    /// `attendance`, or `raw` for an event this version does not decode.
+    pub kind: &'static str,
     /// Device slot, if known.
     pub uid: Option<u16>,
     /// User ID, if known.
     pub user_id: Option<String>,
+    /// Where `user_id` came from: `record` (the record itself) or
+    /// `user_table` (looked up by uid); `null` when unresolved, and for raw
+    /// events.
+    pub user_id_source: Option<&'static str>,
     /// Verification method: `password`, `fingerprint`, `card`, `face` or
     /// `unknown`.
-    pub status: &'static str,
+    pub status: Option<&'static str>,
     /// The raw method code.
-    pub status_code: u8,
+    pub status_code: Option<u8>,
     /// `check_in`, `check_out`, `break_out`, `break_in`, `overtime_in`,
     /// `overtime_out` or `unknown`.
-    pub punch: &'static str,
+    pub punch: Option<&'static str>,
     /// The raw punch code.
-    pub punch_code: u8,
+    pub punch_code: Option<u8>,
     /// Work code, when the layout has one.
     pub workcode: Option<u32>,
+    /// For `kind: raw` only: the undecoded event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawOut>,
 }
 
-impl From<&Attendance> for Punched {
-    fn from(a: &Attendance) -> Self {
+/// An event that was not decoded.
+#[derive(Debug, Clone, Serialize)]
+pub struct RawOut {
+    /// The event flags.
+    pub flags: u32,
+    /// The payload, hex.
+    pub payload_hex: String,
+}
+
+impl EventOut {
+    /// A record read by `attendance pull`, with where its user ID came
+    /// from.
+    #[must_use]
+    pub fn pulled(device: &str, a: &Attendance, user_id_source: UserIdSource) -> Self {
+        Self::attendance(device, "pull", None, a, user_id_source)
+    }
+
+    /// An event from `live`.
+    #[must_use]
+    pub fn captured(device: &str, e: &CapturedEvent) -> Self {
+        let source = match e.source {
+            Source::Live => "live",
+            Source::Backfill => "backfill",
+        };
+        let received_at = Some(host_time(e.received_at));
+        match &e.event {
+            LiveEvent::Attendance(a) => {
+                let user_id_source = e.user_id_source.unwrap_or(UserIdSource::Unresolved);
+                Self::attendance(device, source, received_at, a, user_id_source)
+            }
+            LiveEvent::Raw { flag, payload } => Self {
+                v: SCHEMA_VERSION,
+                id: event_id::raw(device, flag.bits(), payload),
+                device: device.to_owned(),
+                source,
+                device_time: None,
+                received_at,
+                kind: "raw",
+                uid: None,
+                user_id: None,
+                user_id_source: None,
+                status: None,
+                status_code: None,
+                punch: None,
+                punch_code: None,
+                workcode: None,
+                raw: Some(RawOut {
+                    flags: flag.bits(),
+                    payload_hex: hex::encode(payload),
+                }),
+            },
+        }
+    }
+
+    fn attendance(
+        device: &str,
+        source: &'static str,
+        received_at: Option<String>,
+        a: &Attendance,
+        user_id_source: UserIdSource,
+    ) -> Self {
         Self {
+            v: SCHEMA_VERSION,
+            id: event_id::attendance(device, a),
+            device: device.to_owned(),
+            source,
+            device_time: Some(device_time(a.timestamp)),
+            received_at,
+            kind: "attendance",
             uid: a.uid.map(|u| u.0),
             user_id: a.user_id.as_ref().map(|id| id.as_str().to_owned()),
-            status: status_name(a.status),
-            status_code: a.status.to_byte(),
-            punch: punch_name(a.punch),
-            punch_code: a.punch.to_byte(),
+            user_id_source: match (user_id_source, &a.user_id) {
+                (_, None) | (UserIdSource::Unresolved, _) => None,
+                (UserIdSource::Record, Some(_)) => Some("record"),
+                (UserIdSource::UserTable, Some(_)) => Some("user_table"),
+            },
+            status: Some(status_name(a.status)),
+            status_code: Some(a.status.to_byte()),
+            punch: Some(punch_name(a.punch)),
+            punch_code: Some(a.punch.to_byte()),
             workcode: a.workcode,
+            raw: None,
         }
     }
 }
@@ -127,99 +229,6 @@ fn punch_name(p: Punch) -> &'static str {
         Punch::OvertimeIn => "overtime_in",
         Punch::OvertimeOut => "overtime_out",
         Punch::Unknown(_) => "unknown",
-    }
-}
-
-/// One record from `attendance pull`.
-#[derive(Debug, Clone, Serialize)]
-pub struct RecordOut {
-    /// The device (profile name or host).
-    pub device: String,
-    /// Device-local time.
-    pub timestamp: String,
-    /// The record.
-    #[serde(flatten)]
-    pub punch: Punched,
-    /// With `--with-users`: `record`, `user_table` or `unresolved`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id_source: Option<&'static str>,
-}
-
-impl RecordOut {
-    /// A record, with the source of its user ID if it was resolved.
-    #[must_use]
-    pub fn new(device: &str, a: &Attendance, source: Option<UserIdSource>) -> Self {
-        Self {
-            device: device.to_owned(),
-            timestamp: device_time(a.timestamp),
-            punch: Punched::from(a),
-            user_id_source: source.map(|s| match s {
-                UserIdSource::Record => "record",
-                UserIdSource::UserTable => "user_table",
-                UserIdSource::Unresolved => "unresolved",
-            }),
-        }
-    }
-}
-
-/// One event from `live`.
-#[derive(Debug, Clone, Serialize)]
-pub struct EventOut {
-    /// The device (profile name or host).
-    pub device: String,
-    /// `live`, or `backfill` for punches read from the log after a
-    /// reconnect.
-    pub source: &'static str,
-    /// Host time of arrival (RFC 3339, UTC).
-    pub received_at: String,
-    /// Device clock in the event, device-local; `null` for raw events.
-    pub device_time: Option<String>,
-    /// The event.
-    #[serde(flatten)]
-    pub body: EventBody,
-}
-
-/// What an event holds.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EventBody {
-    /// A punch.
-    Attendance(Punched),
-    /// An event that was not decoded.
-    Raw {
-        /// The event flags.
-        flags: u32,
-        /// The payload, hex.
-        payload_hex: String,
-    },
-}
-
-impl EventOut {
-    /// An event from device `device`.
-    #[must_use]
-    pub fn new(device: &str, e: &CapturedEvent) -> Self {
-        Self {
-            device: device.to_owned(),
-            source: match e.source {
-                Source::Live => "live",
-                Source::Backfill => "backfill",
-            },
-            received_at: host_time(e.received_at),
-            device_time: e.device_time.map(device_time),
-            body: body(&e.event),
-        }
-    }
-}
-
-/// The body of an event.
-#[must_use]
-pub fn body(e: &LiveEvent) -> EventBody {
-    match e {
-        LiveEvent::Attendance(a) => EventBody::Attendance(Punched::from(a)),
-        LiveEvent::Raw { flag, payload } => EventBody::Raw {
-            flags: flag.bits(),
-            payload_hex: hex::encode(payload),
-        },
     }
 }
 

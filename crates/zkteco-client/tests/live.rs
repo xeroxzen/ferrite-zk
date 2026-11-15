@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use support::{event_with, users, Delivery, DeviceState, MockDevice};
 use zkteco_client::{
     CaptureOptions, CapturedEvent, Client, Error, EventFlags, LiveCapture, LiveEvent, ReconnectPolicy,
-    Source, Uid, UserId,
+    Resume, Source, Uid, UserId, UserIdSource,
 };
 use zkteco_proto::records::attendance::{Attendance, AttendanceStatus, Punch};
 use zkteco_proto::records::event::{encode_record, EventRecordFormat};
@@ -161,7 +161,13 @@ async fn resolves_users_when_asked() {
     let payload = encode_record(&punch, EventRecordFormat::Numeric12, TextEncoding::UTF8).unwrap();
     let packet = event_with(EventFlags::ATTLOG, &payload);
     dev.push_packets(vec![packet]);
-    let LiveEvent::Attendance(a) = next(&mut capture).await.unwrap().unwrap().event else {
+    let captured = next(&mut capture).await.unwrap().unwrap();
+    assert_eq!(
+        captured.user_id_source,
+        Some(UserIdSource::Record),
+        "the event had it"
+    );
+    let LiveEvent::Attendance(a) = captured.event else {
         panic!("expected attendance");
     };
     assert_eq!(a.uid, Some(Uid(2)));
@@ -372,6 +378,65 @@ async fn next_item(capture: &mut LiveCapture) -> zkteco_client::Result<CapturedE
     next(capture).await.expect("stream still open")
 }
 
+/// A punch by user ID `n` at device time `at`, as the mock records it.
+fn punch_by(at: chrono::NaiveDateTime, n: u16) -> Attendance {
+    Attendance {
+        uid: Some(Uid(n)),
+        user_id: Some(UserId(n.to_string())),
+        timestamp: at,
+        status: AttendanceStatus::Fingerprint,
+        punch: Punch::CheckIn,
+        workcode: None,
+    }
+}
+
+#[tokio::test]
+async fn resume_backfills_what_was_missed_before_going_live() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    // Punches 1 and 2 were delivered by an earlier capture; 3 and 4 were
+    // stored while nothing was listening. All share one device time.
+    dev.record_offline(4);
+    let at = dev.state().time;
+    let opts = CaptureOptions {
+        resume: Some(Resume {
+            since: at,
+            delivered: vec![punch_by(at, 1), punch_by(at, 2)],
+        }),
+        ..backfilling()
+    };
+    let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
+    dev.push_events(1);
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        let e = next_item(&mut capture).await.unwrap();
+        got.push((user_id(&e), e.source));
+    }
+    let (b, l) = (Source::Backfill, Source::Live);
+    assert_eq!(got, [("3".into(), b), ("4".into(), b), ("5".into(), l)]);
+    assert_eq!(capture.stats().backfilled, 2);
+    assert_eq!(dev.count(Command::PrepareBuffer), 1, "the log was read once");
+    let (_, result) = capture.stop().await;
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn resume_without_backfill_catches_nothing_up() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    dev.record_offline(2);
+    let at = dev.state().time;
+    let opts = CaptureOptions {
+        resume: Some(Resume {
+            since: at,
+            delivered: Vec::new(),
+        }),
+        ..reconnecting(3)
+    };
+    let mut capture = LiveCapture::connect(dev.config(), opts).await.unwrap();
+    dev.push_events(1);
+    assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), "3");
+    assert_eq!(dev.count(Command::PrepareBuffer), 0, "the log was not read");
+}
+
 #[tokio::test]
 async fn events_carry_device_and_host_times() {
     let dev = MockDevice::start(DeviceState::default()).await;
@@ -385,9 +450,11 @@ async fn events_carry_device_and_host_times() {
     assert!(first.received_at >= before.0);
     assert!(first.received_instant >= before.1);
     assert!(second.received_instant >= first.received_instant);
+    assert_eq!(first.user_id_source, Some(UserIdSource::Record));
     let raw = event_with(EventFlags::ALARM, &[55, 0, 0, 0]);
     dev.push_packets(vec![raw]);
-    assert_eq!(next_item(&mut capture).await.unwrap().device_time, None);
+    let raw = next_item(&mut capture).await.unwrap();
+    assert_eq!((raw.device_time, raw.user_id_source), (None, None));
 }
 
 #[tokio::test]
