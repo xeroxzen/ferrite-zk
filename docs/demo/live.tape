@@ -21,9 +21,10 @@ Env ZKCTL_CONFIG "/tmp/zkctl-demo/config.toml"
 Env ZKCTL_NO_KEYRING "1"
 
 Hide
-Type "cargo build -q -p zkctl && cargo build -q -p zkteco-client --example demo_device && echo built"
+# The marker is computed, so the typed command does not match it.
+Type "cargo build -q -p zkctl && cargo build -q -p zkteco-client --example demo_device && echo built-$((1+1))"
 Enter
-Wait@10m /built/
+Wait+Screen@10m /built-2/
 Type "export PATH=$PWD/target/debug:$PATH && rm -rf /tmp/zkctl-demo && mkdir -p /tmp/zkctl-demo"
 Enter
 Type "target/debug/examples/demo_device --name front --port 14370 --seed 1 --drop-every 20 >/dev/null &"

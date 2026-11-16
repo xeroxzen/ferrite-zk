@@ -1,3 +1,6 @@
 /target
 __pycache__/
 *.pyc
+
+# Rendered by the vhs tapes in docs/demo; only cover.png is kept.
+docs/demo/*.gif
