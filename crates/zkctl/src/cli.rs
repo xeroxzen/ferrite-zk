@@ -17,7 +17,8 @@ Exit codes:
   2  usage error (bad arguments, missing --yes, unknown device)
   3  connection error or timeout
   4  authentication failed
-  5  the device refused a command
+  5  the device refused a command, or a table kept changing while it was
+     read (transient: records being added; safe to retry)
   6  partial success (for example, rejected records; see stderr)
   7  aborted (confirmation declined, or interrupted)
 

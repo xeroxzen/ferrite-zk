@@ -53,6 +53,9 @@ crates share one version.
 
 ### zkctl
 
+- `Error::TableChanging` (a table that changed during every read) exits
+  with 5, as a device error; the exit-code table in `--help`, the guide
+  and the README say it is transient and safe to retry.
 - `live` in human output reports each device's connection as status lines
   on standard error (`disconnected, reconnecting…`, `reconnected after
   6.2 s, backfilled 3 events`), in the host's local time. The client's

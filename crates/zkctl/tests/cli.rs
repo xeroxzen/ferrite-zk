@@ -158,11 +158,37 @@ async fn help_documents_exit_codes() {
         "0  success",
         "3  connection",
         "4  authentication",
+        "5  the device refused a command, or a table kept changing",
+        "safe to retry",
         "6  partial",
         "7  aborted",
     ] {
         assert!(help.contains(code), "{code} missing from --help");
     }
+}
+
+/// An attendance log that changes during every read: exit 5, nothing
+/// printed.
+#[tokio::test]
+async fn changing_table_exits_5() {
+    let mut state = DeviceState {
+        attendance: punches(4),
+        ..DeviceState::default()
+    };
+    state.faults.punches_after_sizes = usize::MAX;
+    let dev = MockDevice::start(state).await;
+    let env = Env::new();
+    let host = at(&dev);
+    let a = env
+        .run(&args(&host, &["attendance", "pull", "--output", "ndjson"]))
+        .await
+        .code(5);
+    assert_eq!(stdout(&a), "");
+    assert!(
+        stderr(&a).contains("changed during each of 3 reads"),
+        "{}",
+        stderr(&a)
+    );
 }
 
 #[tokio::test]

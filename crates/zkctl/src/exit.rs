@@ -15,7 +15,8 @@ pub enum Exit {
     Connection = 3,
     /// 4: authentication failed.
     Auth = 4,
-    /// 5: the device refused a command.
+    /// 5: the device refused a command, or a table kept changing while it
+    /// was read (transient; safe to retry).
     Device = 5,
     /// 6: partial success.
     Partial = 6,
@@ -97,7 +98,7 @@ pub fn classify(err: &anyhow::Error) -> Exit {
             return match e {
                 E::Io(_) | E::Timeout { .. } | E::ConnectionClosed => Exit::Connection,
                 E::Unauthorized => Exit::Auth,
-                E::DeviceError { .. } | E::ReadOnly(_) => Exit::Device,
+                E::DeviceError { .. } | E::ReadOnly(_) | E::TableChanging { .. } => Exit::Device,
                 _ => Exit::Error,
             };
         }
@@ -123,6 +124,11 @@ mod tests {
             reply: Command::AckError,
         };
         assert_eq!(classify(&wrap(refused)), Exit::Device);
+        let changing = zkteco_client::Error::TableChanging {
+            kind: zkteco_proto::RecordKind::Attendance,
+            attempts: 3,
+        };
+        assert_eq!(classify(&wrap(changing)), Exit::Device);
         assert_eq!(classify(&Fail::usage("x")), Exit::Usage);
         assert_eq!(classify(&anyhow::anyhow!("other")), Exit::Error);
     }

@@ -61,7 +61,7 @@ and [as JSON Schema](https://github.com/xeroxzen/ferrite-zk/blob/main/docs/schem
 | 2 | Usage error (bad arguments, missing `--yes`, unknown device) |
 | 3 | Connection error or timeout |
 | 4 | Authentication failed |
-| 5 | The device refused a command |
+| 5 | The device refused a command, or a table kept changing while it was read (transient; safe to retry) |
 | 6 | Partial success (rejected records; see standard error) |
 | 7 | Aborted (confirmation declined, or interrupted) |
 

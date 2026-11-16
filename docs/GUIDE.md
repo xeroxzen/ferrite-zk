@@ -447,6 +447,7 @@ and merge through a channel: see
 | `DeviceError { command, reply }` | The device refused a command |
 | `ReadOnly(command)` | Refused locally by read-only mode; nothing sent |
 | `Malformed`, `ShortRead`, `UnsupportedRecordFormat` | The reply did not decode |
+| `TableChanging { kind, attempts }` | The table changed during every read (records being added); nothing decoded. Transient: retry |
 | `UserNotFound(user_id)` | No such user |
 | `InvalidArgument`, `Unsupported` | The request cannot be expressed |
 
@@ -459,7 +460,7 @@ and merge through a channel: see
 | 2 | Usage error (bad arguments, missing `--yes`, unknown device) |
 | 3 | Connection error or timeout |
 | 4 | Authentication failed |
-| 5 | The device refused a command (also: enrolment not stored) |
+| 5 | The device refused a command (also: enrolment not stored), or a table kept changing while it was read. The latter is transient and safe to retry: nothing was decoded or written |
 | 6 | Partial success: some records were rejected (see standard error) |
 | 7 | Aborted: confirmation declined, or interrupted |
 
