@@ -129,7 +129,7 @@ Add `-v` to see each failed reconnect attempt and the client's logs, or
 | `--port N` | 14370 | TCP and UDP port on 127.0.0.1 |
 | `--name NAME` | `front` | Device name, in the serial number and the printed commands |
 | `--interval SECS` | 3 | Mean time between punches |
-| `--drop-every SECS` | 30 | How often to go offline, for 5 s |
+| `--drop-every SECS` | 30 | How often to go offline, for 5 s, counting from the first client connection |
 | `--no-drops` | | Never go offline |
 | `--seed N` | 1 | The same seed gives the same people and punches, for recordings |
 

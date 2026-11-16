@@ -207,3 +207,17 @@ async fn demo_device_drops_and_backfills() {
     let event = demo_event(demo, |e| e.source == Source::Backfill).await;
     assert!(matches!(event.event, LiveEvent::Attendance(_)));
 }
+
+/// Drops count from the first client connection: running unwatched for
+/// several drop periods takes the device offline no times.
+#[tokio::test]
+async fn demo_device_drops_only_once_a_client_connects() {
+    let demo = demo_device::start(demo_options(Some(Duration::from_millis(100))))
+        .await
+        .unwrap();
+    let mut reports = Vec::new();
+    let stop = tokio::time::sleep(Duration::from_millis(700));
+    demo.run(stop, |r| reports.push(r)).await;
+    assert!(!reports.is_empty(), "it punched");
+    assert!(reports.iter().all(|r| !r.contains("offline for")), "{reports:?}");
+}

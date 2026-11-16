@@ -49,7 +49,8 @@ pub struct Options {
     pub name: String,
     /// Mean time between punches; each wait is between 2/3 and 4/3 of it.
     pub interval: Duration,
-    /// How often the device drops off the network; `None` never.
+    /// How often the device drops off the network, counting from the first
+    /// client connection; `None` never.
     pub drop_every: Option<Duration>,
     /// How long each drop lasts.
     pub drop_for: Duration,
@@ -132,7 +133,11 @@ impl Demo {
         let mut stop = std::pin::pin!(stop);
         let started = Instant::now();
         let mut next_punch = started + self.wait();
-        let mut next_drop = self.opts.drop_every.map(|d| started + d);
+        // Drops count from the first client connection, not from start-up,
+        // so a recording sees them at the same point however long the
+        // client took to build.
+        let mut next_drop: Option<Instant> = None;
+        let mut drops_armed = false;
         let mut back_at: Option<Instant> = None;
         // Runs until `stop`: a demo has no natural end. Each turn sleeps
         // at most a second, to keep the device clock current.
@@ -153,6 +158,10 @@ impl Demo {
             }
             let at = Instant::now();
             self.device.state().time = now();
+            if !drops_armed && self.device.state().connections > 0 {
+                drops_armed = true;
+                next_drop = self.opts.drop_every.map(|d| at + d);
+            }
             if back_at.is_some_and(|t| at >= t) {
                 back_at = None;
                 self.device.set_offline(false);
@@ -282,7 +291,8 @@ Usage: demo_device [--port N] [--name NAME] [--interval SECS] [--drop-every SECS
   --port N           TCP and UDP port on 127.0.0.1 (default 14370)
   --name NAME        profile and device name (default front)
   --interval SECS    mean time between punches (default 3)
-  --drop-every SECS  go offline for 5 s this often (default 30)
+  --drop-every SECS  go offline for 5 s this often, counting from the first
+                     client connection (default 30)
   --seed N           the same seed gives the same people and punches (default 1)
   --no-drops         never go offline";
 
@@ -339,7 +349,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
 fn banner(opts: &Options, addr: SocketAddr) -> String {
     let drops = match opts.drop_every {
         Some(d) => format!(
-            "offline for {} s every {} s",
+            "offline for {} s every {} s once a client connects",
             opts.drop_for.as_secs(),
             d.as_secs()
         ),
