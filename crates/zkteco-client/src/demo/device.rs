@@ -74,6 +74,10 @@ pub struct Faults {
     pub serial_number_error: bool,
     /// Answer every read of `~SerialNumber` with an empty value.
     pub empty_serial_number: bool,
+    /// Store a punch in the log (no live event) right after answering
+    /// each of the next this many `GetFreeSizes`: someone punching between
+    /// the client's size query and its table read.
+    pub punches_after_sizes: usize,
 }
 
 impl Default for Faults {
@@ -98,6 +102,7 @@ impl Default for Faults {
             reorder_stream_once: None,
             serial_number_error: false,
             empty_serial_number: false,
+            punches_after_sizes: 0,
         }
     }
 }
@@ -531,7 +536,16 @@ impl DeviceState {
     /// Single-packet commands.
     fn simple(&mut self, cmd: Command, p: &[u8]) -> Vec<(Command, u16, Vec<u8>)> {
         match cmd {
-            Command::GetFreeSizes => self.ok(self.sizes()),
+            Command::GetFreeSizes => {
+                let reply = self.ok(self.sizes());
+                if self.faults.punches_after_sizes > 0 {
+                    self.faults.punches_after_sizes -= 1;
+                    self.events_sent += 1;
+                    let record = self.last_event_record();
+                    self.attendance.push(record);
+                }
+                reply
+            }
             Command::GetVersion => self.ok([self.firmware.as_bytes(), &[0]].concat()),
             Command::OptionsRrq => self.read_option(p),
             Command::OptionsWrq => {

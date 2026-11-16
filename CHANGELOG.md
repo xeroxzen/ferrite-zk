@@ -16,6 +16,22 @@ crates share one version.
   after the fields, as `ClientConfig` already works:
   `CaptureOptions::default().reconnect(ReconnectPolicy::default()).backfill(true)`.
   Fields stay public for reading and assignment.
+- Fixed: reading attendance failed with `UnsupportedRecordFormat` when a
+  punch was stored between the record-count query and the table read
+  (the layout is inferred from both), and a log that grew enough could
+  even be decoded with a wrong layout. A detected layout now counts only
+  if the count, read again after the table, is unchanged; otherwise the
+  table is read again, up to three reads, then
+  `Error::TableChanging { kind, attempts }` (new, retryable) with nothing
+  decoded. The same holds for the user table. This mostly hit backfills
+  right after a reconnect, and `attendance pull` on a busy device.
+- Detected user and attendance layouts are kept across
+  `Client::reconnect` to the same device, by serial number (read once per
+  connection that needs it); a different serial number drops them.
+- Fixed: a backfill that failed after a reconnect was reported once and
+  then skipped, losing the punches stored while disconnected until the
+  next drop. It now fails the reconnect attempt, which is retried under
+  the reconnect policy and backfills from the same point.
 - `CaptureStats::connected` and `CaptureStats::reconnect_failures`: whether
   the capture is subscribed (false from a lost connection until the
   reconnect and its backfill are done) and the failed reconnect attempts

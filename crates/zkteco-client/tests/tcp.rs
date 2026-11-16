@@ -7,9 +7,10 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use support::{punches, templates, users, Delivery, DeviceState, Faults, MockDevice};
 use zkteco_client::{Client, Error, ReplyIdPolicy, RetryPolicy, Uid, UserId, UserIdSource};
+use zkteco_proto::records::attendance::AttendanceFormat;
 use zkteco_proto::records::finger;
 use zkteco_proto::records::user::{Privilege, User, UserFormat};
-use zkteco_proto::{ChecksumPolicy, Command, ProtoError, TextEncoding};
+use zkteco_proto::{ChecksumPolicy, Command, ProtoError, RecordKind, TextEncoding};
 
 async fn device(state: DeviceState) -> MockDevice {
     MockDevice::start(state).await
@@ -318,7 +319,12 @@ async fn chunk_plan_and_free_data() {
         .collect();
     let total = 4 + 72 * u32::from(MANY_USERS);
     assert_eq!(reads, [(0, 0xFFC0), (0xFFC0, total - 0xFFC0)]);
-    assert_eq!(dev.commands().last(), Some(&Command::FreeData));
+    let commands = dev.commands();
+    assert_eq!(
+        commands[commands.len() - 3..],
+        [Command::FreeData, Command::GetFreeSizes, Command::OptionsRrq],
+        "the buffer is freed; then the count is confirmed and the serial number read"
+    );
 }
 
 #[tokio::test]
@@ -909,4 +915,94 @@ async fn by_user_id_operations_resolve_or_report_not_found() {
     assert!(dev.state().users.iter().all(|u| u.uid != Uid(3)));
     let err = client.delete_user_by_user_id(&missing).await.unwrap_err();
     assert!(matches!(err, Error::UserNotFound(_)));
+}
+
+/// A punch stored between the size query and the table read makes the
+/// table one record longer than the count (5 x 40 bytes over 4 is not a
+/// layout). The client notices the count changed and reads again.
+#[tokio::test]
+async fn attendance_survives_a_punch_during_the_read() {
+    let mut state = DeviceState {
+        attendance: punches(4),
+        ..DeviceState::default()
+    };
+    state.faults.punches_after_sizes = 1;
+    let dev = MockDevice::start(state).await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let batch = client.attendance().await.unwrap();
+    assert!(batch.is_clean());
+    assert_eq!(batch.records.len(), 5);
+    assert_eq!(batch.records, dev.state().attendance);
+    assert_eq!(
+        dev.count(Command::GetFreeSizes),
+        4,
+        "size, table, size again (changed); size, table, size again (stable)"
+    );
+    // The layout is now known, so a stale count no longer matters: one
+    // size query, one table read, and the new punch is in it.
+    dev.state().faults.punches_after_sizes = 1;
+    let batch = client.attendance().await.unwrap();
+    assert_eq!(batch.records.len(), 6);
+    assert_eq!(batch.records, dev.state().attendance);
+    assert_eq!(dev.count(Command::GetFreeSizes), 5);
+}
+
+/// A log that changes during every read: the client gives up after a
+/// bounded number of reads, decoding nothing with an unconfirmed layout.
+#[tokio::test]
+async fn attendance_gives_up_on_a_log_that_keeps_changing() {
+    let mut state = DeviceState {
+        attendance: punches(4),
+        ..DeviceState::default()
+    };
+    state.faults.punches_after_sizes = usize::MAX;
+    let dev = MockDevice::start(state).await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    let err = client.attendance().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::TableChanging {
+                kind: RecordKind::Attendance,
+                attempts: 3
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        dev.count(Command::GetFreeSizes),
+        6,
+        "three reads, each counted twice"
+    );
+    assert_eq!(
+        client.attendance_format(),
+        None,
+        "no layout taken from an unconfirmed count"
+    );
+}
+
+/// Detected layouts survive `Client::reconnect` to the same device (same
+/// serial number), and are dropped for a different one.
+#[tokio::test]
+async fn reconnect_keeps_layouts_for_the_same_device() {
+    let dev = MockDevice::start(DeviceState {
+        users: users(3),
+        attendance: punches(4),
+        ..DeviceState::default()
+    })
+    .await;
+    let mut client = Client::connect(dev.config()).await.unwrap();
+    client.users().await.unwrap();
+    client.attendance().await.unwrap();
+    let known = (Some(UserFormat::Standard72), Some(AttendanceFormat::Long40));
+    assert_eq!((client.user_format(), client.attendance_format()), known);
+    client.reconnect().await.unwrap();
+    assert_eq!((client.user_format(), client.attendance_format()), known);
+    {
+        let mut st = dev.state();
+        let entry = st.options.iter_mut().find(|(k, _)| k == "~SerialNumber").unwrap();
+        entry.1 = "MOCK0000000002".into();
+    }
+    client.reconnect().await.unwrap();
+    assert_eq!((client.user_format(), client.attendance_format()), (None, None));
 }

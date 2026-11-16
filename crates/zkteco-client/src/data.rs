@@ -7,8 +7,9 @@ use bytes::Bytes;
 use zkteco_proto::command::table;
 use zkteco_proto::records::attendance::{self, Attendance, AttendanceBatch, AttendanceFormat};
 use zkteco_proto::records::finger::{self, Template};
+use zkteco_proto::records::sizes::DeviceSizes;
 use zkteco_proto::records::user::{self, User, UserFormat};
-use zkteco_proto::{requests, Batch, Command, ProtoError, Uid, UserId};
+use zkteco_proto::{requests, Batch, Command, ProtoError, RecordKind, Uid, UserId};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
@@ -48,6 +49,13 @@ pub enum RawTable {
 }
 
 impl RawTable {
+    const fn record_kind(self) -> RecordKind {
+        match self {
+            Self::Users => RecordKind::User,
+            Self::Attendance => RecordKind::Attendance,
+        }
+    }
+
     /// The table command and selector that stage this table.
     pub(crate) fn staging(self) -> (Command, u32) {
         match self {
@@ -70,6 +78,27 @@ fn announced_len(data: &[u8]) -> Result<usize> {
     Ok(usize::try_from(u32::from_le_bytes(prefix)).unwrap_or(usize::MAX))
 }
 
+/// Reads of a table before giving up on one that keeps changing during
+/// the read.
+pub(crate) const TABLE_READS: u32 = 3;
+
+/// How to settle a table's record layout.
+struct Layout<F> {
+    kind: RawTable,
+    configured: Option<F>,
+    detected: Option<F>,
+    count: fn(&DeviceSizes) -> u32,
+    detect: fn(usize, usize) -> zkteco_proto::Result<F>,
+    record_len: fn(F) -> usize,
+}
+
+enum TableRead<F> {
+    Empty,
+    Read(Bytes, F),
+    /// The record count changed during the read.
+    Changed,
+}
+
 fn count(n: u32) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
@@ -80,38 +109,39 @@ impl Client {
     /// The record layout (28, 72 or 120 bytes) comes from
     /// [`ClientConfig::user_format`](crate::ClientConfig::user_format) or is
     /// detected from the table size and the user count; it is remembered for
-    /// later writes. Records that fail to decode are in
+    /// later writes, and kept across reconnects to the same device (by
+    /// serial number). A detected layout counts only if the user count is
+    /// the same after the table read as before it; otherwise the table is
+    /// read again (DECISIONS.md D40). Records that fail to decode are in
     /// [`Batch::rejected`].
     ///
     /// # Errors
     ///
     /// [`Error::UnsupportedRecordFormat`] if the layout cannot be detected;
+    /// [`Error::TableChanging`] if the table changed during every read;
     /// device, timeout or transfer errors.
     pub async fn users(&mut self) -> Result<Batch<User>> {
-        let users = count(self.read_sizes().await?.users());
-        if users == 0 {
-            return Ok(Batch::default());
-        }
-        let data = self.raw_table(RawTable::Users).await?;
-        let announced = announced_len(&data)?;
-        if announced == 0 {
-            tracing::warn!(users, "device reported users but sent an empty table");
-            return Ok(Batch::default());
-        }
-        let format = match self.config.user_format {
-            Some(f) => f,
-            None => UserFormat::detect(announced, users)?,
+        let layout = Layout {
+            kind: RawTable::Users,
+            configured: self.config.user_format,
+            detected: self.detected.user,
+            count: |s| s.users(),
+            detect: UserFormat::detect,
+            record_len: UserFormat::record_len,
         };
-        self.detected_user_format = Some(format);
+        let Some((data, format)) = self.read_table(&layout).await? else {
+            return Ok(Batch::default());
+        };
+        self.remember(|d| d.user = Some(format)).await;
         Ok(user::decode_table_as(&data, format, self.config.encoding)?)
     }
-
     /// All attendance records.
     ///
     /// The layout (8, 16, 40 or 49 bytes) comes from
     /// [`ClientConfig::attendance_format`](crate::ClientConfig::attendance_format)
-    /// or is detected. Records are returned as stored: short layouts carry
-    /// only the device-internal `uid`. Use
+    /// or is detected, as for [`users`](Self::users). Records are returned
+    /// as stored: short
+    /// layouts carry only the device-internal `uid`. Use
     /// [`attendance_with_users`](Self::attendance_with_users) to resolve
     /// user IDs.
     ///
@@ -119,22 +149,67 @@ impl Client {
     ///
     /// As for [`users`](Self::users).
     pub async fn attendance(&mut self) -> Result<AttendanceBatch> {
-        let records = count(self.read_sizes().await?.records());
-        if records == 0 {
+        let layout = Layout {
+            kind: RawTable::Attendance,
+            configured: self.config.attendance_format,
+            detected: self.detected.attendance,
+            count: |s| s.records(),
+            detect: AttendanceFormat::detect,
+            record_len: AttendanceFormat::record_len,
+        };
+        let Some((data, format)) = self.read_table(&layout).await? else {
             return Ok(Batch::default());
+        };
+        self.remember(|d| d.attendance = Some(format)).await;
+        Ok(attendance::decode_table_as(&data, format, self.config.encoding)?)
+    }
+
+    /// Read a table and settle its layout: `None` for an empty table.
+    /// Errors with [`Error::TableChanging`] if the table changed during
+    /// each of [`TABLE_READS`] reads.
+    async fn read_table<F: Copy>(&mut self, layout: &Layout<F>) -> Result<Option<(Bytes, F)>> {
+        for attempt in 1..=TABLE_READS {
+            match self.read_table_once(layout).await? {
+                TableRead::Empty => return Ok(None),
+                TableRead::Read(data, format) => return Ok(Some((data, format))),
+                TableRead::Changed => {
+                    tracing::debug!(table = ?layout.kind, attempt, "table changed during the read");
+                }
+            }
         }
-        let data = self.raw_table(RawTable::Attendance).await?;
+        Err(Error::TableChanging {
+            kind: layout.kind.record_kind(),
+            attempts: TABLE_READS,
+        })
+    }
+
+    /// One read. The layout is configured, known from an earlier read of
+    /// this device (if the length fits it), or detected from the table
+    /// length and the record count, read before the table. A record stored
+    /// in between makes them disagree, so a detected layout counts only if
+    /// the count, read again after the table, is unchanged.
+    async fn read_table_once<F: Copy>(&mut self, layout: &Layout<F>) -> Result<TableRead<F>> {
+        let records = count((layout.count)(&self.read_sizes().await?));
+        if records == 0 {
+            return Ok(TableRead::Empty);
+        }
+        let data = self.raw_table(layout.kind).await?;
         let announced = announced_len(&data)?;
         if announced == 0 {
-            tracing::warn!(records, "device reported records but sent an empty table");
-            return Ok(Batch::default());
+            tracing::warn!(table = ?layout.kind, records, "device reported records but sent an empty table");
+            return Ok(TableRead::Empty);
         }
-        let format = match self.config.attendance_format {
-            Some(f) => f,
-            None => AttendanceFormat::detect(announced, records)?,
-        };
-        self.detected_attendance_format = Some(format);
-        Ok(attendance::decode_table_as(&data, format, self.config.encoding)?)
+        let known = layout.configured.or(layout
+            .detected
+            .filter(|f| announced.is_multiple_of((layout.record_len)(*f))));
+        if let Some(format) = known {
+            return Ok(TableRead::Read(data, format));
+        }
+        let detected = (layout.detect)(announced, records);
+        if count((layout.count)(&self.read_sizes().await?)) != records {
+            return Ok(TableRead::Changed);
+        }
+        Ok(TableRead::Read(data, detected?))
     }
 
     /// A table image as the device sends it: a `u32` byte length, then the

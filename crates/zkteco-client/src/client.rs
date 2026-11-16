@@ -35,10 +35,9 @@ pub struct Client {
     pub(crate) config: ClientConfig,
     link: Option<Link>,
     session: Session,
-    /// User layout detected from the last user table read.
-    pub(crate) detected_user_format: Option<UserFormat>,
-    /// Attendance layout detected from the last attendance read.
-    pub(crate) detected_attendance_format: Option<AttendanceFormat>,
+    /// Record layouts detected on this device; kept across reconnects to
+    /// the same device.
+    pub(crate) detected: Detected,
     /// Live events received while waiting for replies.
     pending: VecDeque<Queued>,
     dropped_events: u64,
@@ -122,8 +121,7 @@ impl Client {
             config,
             link: Some(link),
             session: Session::new(),
-            detected_user_format: None,
-            detected_attendance_format: None,
+            detected: Detected::default(),
             pending: VecDeque::new(),
             dropped_events: 0,
             discarded_replies: 0,
@@ -187,6 +185,7 @@ impl Client {
     pub async fn reconnect(&mut self) -> Result<()> {
         self.close().await;
         let fresh = Self::connect(self.config.clone()).await?;
+        let detected = std::mem::take(&mut self.detected);
         let pending = std::mem::take(&mut self.pending);
         let recording = self.recording.take();
         let (dropped, discarded) = (self.dropped_events, self.discarded_replies);
@@ -199,7 +198,46 @@ impl Client {
         self.recording = recording;
         self.dropped_events = dropped;
         self.discarded_replies = discarded;
+        self.keep_layouts(detected).await
+    }
+
+    /// After a reconnect, keep the layouts detected before it if the device
+    /// has the same serial number; otherwise they are detected again.
+    async fn keep_layouts(&mut self, earlier: Detected) -> Result<()> {
+        let Some(serial) = earlier.serial.as_deref() else {
+            return Ok(());
+        };
+        match self.serial_number().await {
+            Ok(now) if now == serial => self.detected = earlier,
+            Ok(now) => {
+                tracing::info!(
+                    was = serial,
+                    now,
+                    "device serial number changed; detecting record layouts again"
+                );
+                self.detected.serial_read = true;
+                self.detected.serial = Some(now).filter(|s| !s.is_empty());
+            }
+            Err(e) if e.is_fatal() => return Err(e),
+            Err(e) => tracing::info!(%e, "serial number unreadable; detecting record layouts again"),
+        }
         Ok(())
+    }
+
+    /// Record a detected layout. The first time, also read the serial
+    /// number that keys it across reconnects. If that read fails, the
+    /// layout still serves this connection but is not carried over.
+    pub(crate) async fn remember(&mut self, set: impl FnOnce(&mut Detected)) {
+        set(&mut self.detected);
+        if self.detected.serial_read {
+            return;
+        }
+        self.detected.serial_read = true;
+        match self.serial_number().await {
+            Ok(serial) if !serial.is_empty() => self.detected.serial = Some(serial),
+            Ok(_) => tracing::debug!("empty serial number; layouts not kept across reconnects"),
+            Err(e) => tracing::debug!(%e, "serial number unreadable; layouts not kept across reconnects"),
+        }
     }
 
     /// Whether the connection is open. It closes after a timeout, an I/O or
@@ -246,14 +284,14 @@ impl Client {
     /// table read. `None` before any read.
     #[must_use]
     pub fn user_format(&self) -> Option<UserFormat> {
-        self.config.user_format.or(self.detected_user_format)
+        self.config.user_format.or(self.detected.user)
     }
 
     /// The attendance layout in use: configured, or detected by the last
     /// attendance read. `None` before any read.
     #[must_use]
     pub fn attendance_format(&self) -> Option<AttendanceFormat> {
-        self.config.attendance_format.or(self.detected_attendance_format)
+        self.config.attendance_format.or(self.detected.attendance)
     }
 
     /// The configuration in use.
@@ -515,6 +553,18 @@ impl Client {
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
     }
+}
+
+/// Record layouts detected on a device, and the serial number that tells
+/// whether a reconnect reached the same device.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Detected {
+    pub(crate) user: Option<UserFormat>,
+    pub(crate) attendance: Option<AttendanceFormat>,
+    /// `None` if not read yet, empty, or unreadable.
+    pub(crate) serial: Option<String>,
+    /// Whether reading the serial number was tried on this connection.
+    pub(crate) serial_read: bool,
 }
 
 /// A live event and when it arrived.

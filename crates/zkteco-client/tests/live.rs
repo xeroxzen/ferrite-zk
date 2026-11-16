@@ -12,7 +12,7 @@ use zkteco_client::{
 };
 use zkteco_proto::records::attendance::{Attendance, AttendanceStatus, Punch};
 use zkteco_proto::records::event::{encode_record, EventRecordFormat};
-use zkteco_proto::{Command, TextEncoding};
+use zkteco_proto::{Command, RecordKind, TextEncoding};
 
 /// No heartbeat, so tests see only the packets they cause.
 fn quiet() -> CaptureOptions {
@@ -503,6 +503,135 @@ async fn reconnect_backfills_missed_punches_once() {
     let stats = capture.stats();
     assert_eq!((stats.events, stats.backfilled, stats.reconnects), (5, 2, 1));
     assert_eq!(stats.duplicates, 3, "punches 1 and 2 in the log, punch 4 resent");
+}
+
+/// A punch stored between the backfill's size query and its table read
+/// is backfilled with the rest, not lost with them.
+#[tokio::test]
+async fn backfill_survives_a_punch_during_the_read() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let mut capture = LiveCapture::connect(dev.config(), backfilling()).await.unwrap();
+    dev.drop_connection();
+    dev.record_offline(2);
+    dev.state().faults.punches_after_sizes = 1;
+    next_item(&mut capture).await.unwrap_err();
+    for id in ["1", "2", "3"] {
+        let e = next_item(&mut capture).await.unwrap();
+        assert_eq!((user_id(&e), e.source), (id.to_string(), Source::Backfill));
+    }
+    let stats = capture.stats();
+    assert_eq!(
+        (stats.connected, stats.reconnects, stats.backfilled),
+        (true, 1, 3)
+    );
+}
+
+/// A backfill that fails fails the reconnect attempt: the capture stays
+/// disconnected, reconnects again, and backfills from the same point, so
+/// nothing stored while disconnected is lost.
+#[tokio::test]
+async fn failed_backfill_is_retried_with_the_reconnect() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let mut capture = LiveCapture::connect(dev.config(), backfilling()).await.unwrap();
+    dev.drop_connection();
+    dev.record_offline(2);
+    // A punch after each of the first five size queries: every read of the
+    // first backfill sees the log change (punches 3 to 7), so it fails.
+    dev.state().faults.punches_after_sizes = 5;
+    next_item(&mut capture).await.unwrap_err();
+    let e = next_item(&mut capture).await.unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::TableChanging {
+                kind: RecordKind::Attendance,
+                attempts: 3
+            }
+        ),
+        "{e:?}"
+    );
+    let stats = capture.stats();
+    assert_eq!(
+        (stats.connected, stats.reconnect_failures, stats.reconnects),
+        (false, 1, 0),
+        "the attempt failed"
+    );
+    for id in 1..=7 {
+        let e = next_item(&mut capture).await.unwrap();
+        assert_eq!((user_id(&e), e.source), (id.to_string(), Source::Backfill));
+    }
+    let stats = capture.stats();
+    assert_eq!(
+        (
+            stats.connected,
+            stats.reconnect_failures,
+            stats.reconnects,
+            stats.backfilled
+        ),
+        (true, 0, 1, 7)
+    );
+    assert_eq!(dev.state().connections, 3);
+}
+
+/// The layout found by the first backfill is kept across the next
+/// reconnect (same serial number), so a log that changes during every
+/// read no longer matters: the count is not needed.
+#[tokio::test]
+async fn known_layout_survives_a_reconnect() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let mut capture = LiveCapture::connect(dev.config(), backfilling()).await.unwrap();
+    dev.drop_connection();
+    dev.record_offline(2);
+    next_item(&mut capture).await.unwrap_err();
+    for id in ["1", "2"] {
+        assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), id);
+    }
+    dev.drop_connection();
+    dev.record_offline(2);
+    dev.state().faults.punches_after_sizes = usize::MAX;
+    next_item(&mut capture).await.unwrap_err();
+    // 3 and 4 stored while disconnected; 5 stored right after the size
+    // query, before the table read.
+    for id in ["3", "4", "5"] {
+        let e = next_item(&mut capture).await.unwrap();
+        assert_eq!((user_id(&e), e.source), (id.to_string(), Source::Backfill));
+    }
+    let stats = capture.stats();
+    assert_eq!(
+        (stats.connected, stats.reconnects, stats.reconnect_failures),
+        (true, 2, 0)
+    );
+}
+
+/// A different serial number after a reconnect is a different device:
+/// the layout is detected again, here from a log that keeps changing.
+#[tokio::test]
+async fn new_serial_number_drops_the_known_layout() {
+    let dev = MockDevice::start(DeviceState::default()).await;
+    let mut capture = LiveCapture::connect(dev.config(), backfilling()).await.unwrap();
+    dev.drop_connection();
+    dev.record_offline(2);
+    next_item(&mut capture).await.unwrap_err();
+    for id in ["1", "2"] {
+        assert_eq!(user_id(&next_item(&mut capture).await.unwrap()), id);
+    }
+    set_serial_number(&dev, "MOCK0000000002");
+    dev.drop_connection();
+    dev.state().faults.punches_after_sizes = usize::MAX;
+    next_item(&mut capture).await.unwrap_err();
+    let e = next_item(&mut capture).await.unwrap_err();
+    assert!(matches!(e, Error::TableChanging { .. }), "{e:?}");
+    assert!(!capture.stats().connected);
+}
+
+fn set_serial_number(dev: &MockDevice, serial: &str) {
+    let mut st = dev.state();
+    let entry = st
+        .options
+        .iter_mut()
+        .find(|(k, _)| k == "~SerialNumber")
+        .expect("the mock has a serial number");
+    entry.1 = serial.into();
 }
 
 #[tokio::test]

@@ -123,11 +123,11 @@ impl Client {
     /// (PROTOCOL.md 9.1; D23), so only verified hardware reports can
     /// answer; otherwise this fails, reporting the device's values.
     async fn user_format_for_write(&mut self) -> Result<UserFormat> {
-        if let Some(f) = self.config.user_format.or(self.detected_user_format) {
+        if let Some(f) = self.config.user_format.or(self.detected.user) {
             return Ok(f);
         }
         self.users().await?;
-        if let Some(f) = self.detected_user_format {
+        if let Some(f) = self.detected.user {
             return Ok(f);
         }
         let facts = self.device_facts().await?;

@@ -211,33 +211,38 @@ impl Capture {
             self.subscribe().await
         };
         if let Err(e) = attempt.await {
-            self.failures = self.failures.saturating_add(1);
-            self.counters
-                .reconnect_failures
-                .store(self.failures, Ordering::Relaxed);
-            if matches!(e, Error::Unauthorized) {
-                self.ended = true;
-            }
-            tracing::warn!(%e, failures = self.failures, "live capture reconnect failed");
-            return Step::Failed(e);
+            return self.reconnect_failed(e);
         }
         tracing::info!(after_failures = self.failures, "live capture resubscribed");
+        // A reconnect without its backfill would lose what was stored while
+        // disconnected, so a failed backfill fails the attempt: the next
+        // one reconnects and backfills again from the same watermark.
+        if self.opts.backfill {
+            if let Err(e) = self.backfill().await {
+                self.client.close().await;
+                return self.reconnect_failed(e);
+            }
+        }
         self.failures = 0;
         self.counters.reconnects.fetch_add(1, Ordering::Relaxed);
-        let backfilled = if self.opts.backfill {
-            self.backfill().await
-        } else {
-            Ok(())
-        };
         self.counters.reconnect_failures.store(0, Ordering::Relaxed);
         self.counters
             .connected
             .store(self.client.is_connected(), Ordering::Relaxed);
-        if let Err(e) = backfilled {
-            tracing::warn!(%e, "backfill after reconnect failed");
-            return Step::Failed(e);
-        }
         Step::Idle
+    }
+
+    /// Count a failed reconnect attempt and report it.
+    fn reconnect_failed(&mut self, e: Error) -> Step {
+        self.failures = self.failures.saturating_add(1);
+        self.counters
+            .reconnect_failures
+            .store(self.failures, Ordering::Relaxed);
+        if matches!(e, Error::Unauthorized) {
+            self.ended = true;
+        }
+        tracing::warn!(%e, failures = self.failures, "live capture reconnect failed");
+        Step::Failed(e)
     }
 
     /// With [`CaptureOptions::resume`] and backfill, queue what was stored

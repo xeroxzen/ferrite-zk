@@ -50,6 +50,18 @@ pub enum Error {
         detail: String,
     },
 
+    /// A table kept changing while it was read: each of `attempts` reads
+    /// found a different record count after the table than before it, so
+    /// its record layout could not be confirmed and nothing was decoded.
+    /// Records are being added right now; retrying later may succeed.
+    #[error("the {kind:?} table changed during each of {attempts} reads")]
+    TableChanging {
+        /// Which table.
+        kind: RecordKind,
+        /// Reads made.
+        attempts: u32,
+    },
+
     /// A transfer ended with fewer bytes than announced.
     #[error("short read: expected {expected} bytes, got {got}")]
     ShortRead {

@@ -824,23 +824,55 @@ list.
   `Packet`), and the `demo` module (hidden, not API). These can follow
   before 0.1.0 if any is expected to grow.
 
+## D40. Attendance reads while the log grows (after the stress harness)
+
+- The attendance layout (8, 16, 40 or 49 bytes) is detected from the
+  table length and the record count, and the count is read
+  (`GetFreeSizes`) before the table. A punch stored in between makes them
+  disagree: 5 x 40 bytes over a count of 4 reads as "50-byte records", an
+  error; a log that doubled in between could even divide into a valid,
+  wrong layout. A backfill runs right after a reconnect, exactly when
+  punches are likely, and `merges_devices_across_a_reconnect` hit this
+  about once in 100 runs under load (found with the ignored stress test
+  `stress_merges_devices_across_a_reconnect`; the earlier hypothesis of
+  reply timeouts was wrong).
+- A layout is used only when it is configured, known from an earlier
+  read of the same device, or detected from a count that is confirmed:
+  whenever the client has to detect it, it reads the count again after
+  the table. If the count changed, it reads the table again, up to three
+  reads; if it changed every time, the read fails with
+  `Error::TableChanging { kind, attempts }` and nothing is decoded. An
+  unchecked last read was considered and rejected: a log that doubled in
+  between can divide into a valid, wrong layout, and garbage records are
+  worse than an error the caller can retry. The same applies to the user
+  table (a user added during the read).
+- A detected layout is kept for the connection and, keyed by the device's
+  serial number, across `Client::reconnect`: the client reads
+  `~SerialNumber` once, when it first detects a layout, and again after a
+  reconnect; the same serial keeps the layouts, a different one (another
+  device behind the address) drops them, and an unreadable or empty
+  serial means they are detected again. With the layout known, the count
+  is not needed, so a live capture's backfills after the first are immune
+  to the race. `LiveCapture` reconnects through its own `Client`, so it
+  keeps them with no state of its own. A layout set in `ClientConfig` is
+  used as given. Cost: one extra `GetFreeSizes` per detection and one
+  `OptionsRrq` per connection that detects a layout or reconnects with
+  one.
+- A backfill after a reconnect that fails now fails the reconnect
+  attempt: the connection is closed, `CaptureStats::connected` stays
+  false, the attempt counts toward `ReconnectPolicy::max_attempts`, and
+  the next attempt backfills again from the same watermark. Before, the
+  capture reported the error once and carried on live, losing what was
+  stored while disconnected until the next drop. `reconnects` counts only
+  reconnects whose backfill succeeded.
+- Tests: the mock's `punches_after_sizes` fault stores a punch after each
+  size query, making the race deterministic: client reads, the bounded
+  give-up with nothing decoded, backfill, failed backfill retried, the
+  layout kept across a reconnect, and dropped for a new serial number.
+
 ## Known issues
 
-- **Backfill fails if a punch lands between the size query and the table
-  read** (found through `merges_devices_across_a_reconnect`, zkctl
-  `tests/live.rs`, which failed about 1 run in 100 under load). The client
-  reads the record count (`GetFreeSizes`), then the attendance table, and
-  infers the record layout from table length / count. A punch stored in
-  between makes the table one record longer than the count: 5 x 40 bytes
-  over a count of 4 gives "50-byte records", and the read fails with
-  `UnsupportedRecordFormat`. After a reconnect, the capture reports the
-  backfill error once and carries on live, so the records stored while
-  disconnected are not delivered until the next reconnect. The same race
-  affects `attendance pull`. The earlier hypothesis (reply timeouts under
-  load) was wrong. Reproduced with the ignored stress test
-  `stress_merges_devices_across_a_reconnect`, which writes a timeline of
-  the test's steps, zkctl's debug log and the mock's requests on failure.
-  Not yet fixed.
+None open.
 
 ## Open questions (blocked on `zkctl diagnose` reports from hardware)
 
