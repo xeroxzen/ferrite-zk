@@ -7,6 +7,8 @@ crates share one version.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-11-16
+
 ### zkteco-client
 
 - **Breaking:** `CaptureOptions`, `ReconnectPolicy`, `Resume`,
@@ -140,5 +142,6 @@ tested against a mock device only.
   reconnecting is not established. Details in `docs/DECISIONS.md` (Known
   issues).
 
-[Unreleased]: https://github.com/xeroxzen/ferrite-zk/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/xeroxzen/ferrite-zk/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/xeroxzen/ferrite-zk/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/xeroxzen/ferrite-zk/releases/tag/v0.1.0-alpha.1

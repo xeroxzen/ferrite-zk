@@ -10,7 +10,7 @@ fingerprint enrolment. Built on
 against a mock device.
 
 ```sh
-cargo install zkctl --version 0.1.0-alpha.1
+cargo install zkctl --version 0.1.0-alpha.2
 
 zkctl device add front --host 192.168.1.201
 zkctl device set-password front          # stored in the OS keyring

@@ -5,7 +5,7 @@ access-control devices (the "ZK protocol", port 4370, TCP and UDP), with
 feature parity with [pyzk](https://github.com/fananimi/pyzk).
 
 > **Status: alpha, untested on physical devices.** Version
-> `0.1.0-alpha.1`. Every layout and flow is implemented from the protocol
+> `0.1.0-alpha.2`. Every layout and flow is implemented from the protocol
 > manual and the reference implementation and tested against a mock device
 > only. If you have a device, see [Help wanted](#help-wanted-device-reports).
 
@@ -18,14 +18,14 @@ feature parity with [pyzk](https://github.com/fananimi/pyzk).
 ## Install
 
 ```sh
-cargo install zkctl --version 0.1.0-alpha.1
+cargo install zkctl --version 0.1.0-alpha.2
 ```
 
 As a library:
 
 ```toml
 [dependencies]
-zkteco-client = "0.1.0-alpha.1"
+zkteco-client = "0.1.0-alpha.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

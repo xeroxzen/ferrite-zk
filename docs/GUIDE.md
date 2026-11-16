@@ -27,7 +27,7 @@ menu under communication settings. No device at hand? See
 ### Command line
 
 ```sh
-cargo install zkctl --version 0.1.0-alpha.1
+cargo install zkctl --version 0.1.0-alpha.2
 
 zkctl --host 192.168.1.201 info              # one-off, by address
 zkctl device add front --host 192.168.1.201  # or give it a name
